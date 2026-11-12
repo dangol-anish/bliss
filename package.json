@@ -1,0 +1,24 @@
+{
+  "name": "bliss",
+  "private": true,
+  "scripts": {
+    "build": "npm run build:js && tailwindcss -i ./frontend/input.css -o ./frontend/dist/app.css --minify",
+    "dev:css": "tailwindcss -i ./frontend/input.css -o ./frontend/dist/app.css --watch",
+    "build:js": "esbuild frontend/downloader.js --bundle --minify --format=esm --jsx=automatic --outfile=frontend/dist/downloader.js"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "tailwindcss": "^4.0.0"
+  },
+  "dependencies": {
+    "@radix-ui/react-label": "^2.1.17",
+    "@radix-ui/react-slot": "^1.5.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "sonner": "^2.0.8",
+    "tailwind-merge": "^3.7.0"
+  }
+}
