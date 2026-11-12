@@ -19,6 +19,7 @@ export function RecapPreview() {
   const [catalog, setCatalog] = useState([]);
   const [series, setSeries] = useState(() => params.get("series") ?? "");
   const [chapter, setChapter] = useState(() => params.get("chapter") ?? "");
+  const [endChapter, setEndChapter] = useState(() => params.get("end_chapter") ?? params.get("chapter") ?? "");
   const [details, setDetails] = useState(null);
   const [error, setError] = useState("");
   const [progressId, setProgressId] = useState(null);
@@ -31,12 +32,12 @@ export function RecapPreview() {
     return () => controller.abort();
   }, []);
 
-  const query = new URLSearchParams({ series, chapter }).toString();
+  const query = new URLSearchParams({ series, chapter, end_chapter: endChapter }).toString();
   useEffect(() => {
     if (!chapter || savedPreview) return;
     const controller = new AbortController();
     request(`/api/preview/chapter?${query}`, { signal: controller.signal })
-      .then(setDetails)
+      .then(result => { if (!controller.signal.aborted) setDetails(result); })
       .catch(err => { if (!controller.signal.aborted) setError(err.message); });
     return () => controller.abort();
   }, [chapter, query, savedPreview]);
@@ -61,10 +62,10 @@ export function RecapPreview() {
     return () => { controller.abort(); clearTimeout(timer); };
   }, [progressId]);
 
-  function select(nextSeries, nextChapter) {
+  function select(nextSeries, nextChapter, nextEnd = nextChapter) {
     if (savedPreview) {
       const url = new URL(window.location.href);
-      for (const name of ["preview", "series", "chapter"]) url.searchParams.delete(name);
+      for (const name of ["preview", "series", "chapter", "end_chapter"]) url.searchParams.delete(name);
       window.history.replaceState(null, "", url);
     }
     setSavedPreview("");
@@ -72,6 +73,7 @@ export function RecapPreview() {
     setError("");
     setSeries(nextSeries);
     setChapter(nextChapter);
+    setEndChapter(nextEnd);
   }
 
   async function generate() {
@@ -82,7 +84,7 @@ export function RecapPreview() {
     try {
       setDetails(await request("/api/preview/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ series, chapter, key: details.key, progress_id: id }),
+        body: JSON.stringify({ series, chapter, end_chapter: endChapter, key: details.key, progress_id: id }),
       }));
       setPercent(100);
     } catch (err) {
@@ -93,6 +95,7 @@ export function RecapPreview() {
   }
 
   const chapters = catalog.find(item => item.name === series)?.chapters ?? [];
+  const endOptions = chapters.slice(Math.max(0, chapters.indexOf(chapter)));
   const videoKey = /^[a-f0-9]{64}$/.test(savedPreview) ? savedPreview : details?.ready ? details.key : "";
   const video = videoKey && series && chapter ? `/api/preview/video/${videoKey}?${query}` : "";
   return (
@@ -107,11 +110,23 @@ export function RecapPreview() {
           </NativeSelect>
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="preview-chapter">Chapter</Label>
+          <Label htmlFor="preview-chapter">From</Label>
           <NativeSelect id="preview-chapter" className={selectStyle} value={chapter} disabled={!series || !!progressId}
-            onChange={event => select(series, event.target.value)}>
+            onChange={event => {
+              const nextChapter = event.target.value;
+              const keepEnd = nextChapter && endChapter !== chapter && chapters.indexOf(endChapter) >= chapters.indexOf(nextChapter);
+              select(series, nextChapter, keepEnd ? endChapter : nextChapter);
+            }}>
             <option value="">Select chapter</option>
             {chapters.map(item => <option key={item}>{item}</option>)}
+          </NativeSelect>
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="preview-end-chapter">To</Label>
+          <NativeSelect id="preview-end-chapter" className={selectStyle} value={endChapter} disabled={!chapter || !!progressId}
+            onChange={event => select(series, chapter, event.target.value)}>
+            {!chapter && <option value="">Select chapter</option>}
+            {endOptions.map(item => <option key={item}>{item}</option>)}
           </NativeSelect>
         </div>
         <Button type="button" disabled={!details || !!progressId || !!video} onClick={generate}>
@@ -120,16 +135,13 @@ export function RecapPreview() {
         {video && <Button asChild variant="outline"><a href={`${video}&download=true`} download>Download</a></Button>}
       </div>
       {progressId && (
-        <div role="status" className="flex max-w-xs items-center gap-3 text-sm text-muted-foreground">
-          <progress aria-label="Preview progress" value={percent} max={100} className="w-full accent-white" />
-          <span>{percent}%</span>
-        </div>
+        <p role="status" aria-label="Preview progress" className="text-sm text-muted-foreground">{percent}%</p>
       )}
       {error && <p role="alert" className="text-sm text-muted-foreground">{error}</p>}
       {video && (
         <video key={video} src={video} controls playsInline preload="metadata"
           className="aspect-video max-h-[72dvh] w-full rounded-md bg-black"
-          onError={() => setError("The preview could not play. Reload this chapter and try again.")} />
+          onError={() => setError("The preview could not play. Reload Preview and try again.")} />
       )}
     </section>
   );

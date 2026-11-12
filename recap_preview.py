@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -14,11 +15,11 @@ from uuid import UUID
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from narration import digest, selection
-from panel_review import open_strip, read_review
-from renumber import chapter_folder
+from panel_review import latest_strip, open_strip, read_review
+from renumber import chapter_folder, chapter_images, directories
 from studio_bridge import local_request
 
 VOICE = "en-US-SteffanNeural"
@@ -29,12 +30,13 @@ BELL = Path(__file__).resolve().parent / "data" / "episode-one-bell.mp3"
 BELL_URL = "https://cdn.pixabay.com/audio/2025/05/06/audio_2fd68b9a9a.mp3"
 MOVES = ("left", "right", "in", "up", "out", "down", "right", "up", "left", "out", "down", "in")
 SLIDES = {"left": (-110, 0), "right": (110, 0), "up": (0, -65), "down": (0, 65)}
-RENDER_VERSION = 4
+RENDER_VERSION = 6
 
 
 class PreviewRequest(BaseModel):
     series: str
     chapter: str
+    end_chapter: str | None = None
     progress_id: UUID
     key: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -126,6 +128,20 @@ def panel_layers(crop):
     return canvas, layer
 
 
+@lru_cache(maxsize=1)
+def watermark_overlay():
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 22)
+    except OSError:
+        font = ImageFont.load_default(size=22)
+    overlay = Image.new("RGBA", (280, 44))
+    ImageDraw.Draw(overlay).text(
+        (278, 42), "UNLIMITED RECAPS", font=font, anchor="rb",
+        fill=(255, 255, 255, 100), stroke_width=1, stroke_fill=(0, 0, 0, 70),
+    )
+    return overlay
+
+
 def panel_frame(background, layer, move, phase):
     width, height = SIZE
     eased = phase * phase * (3 - 2 * phase)
@@ -140,6 +156,8 @@ def panel_frame(background, layer, move, phase):
     )
     canvas = background.copy()
     canvas.paste(shifted, (0, 0), shifted)
+    watermark = watermark_overlay()
+    canvas.paste(watermark, (width - watermark.width - 22, height - watermark.height - 18), watermark)
     return canvas
 
 
@@ -218,12 +236,45 @@ def render(folder, source, beats, target, report, *, opening_bell=False):
     return [(panel, frame / FPS) for panel, frame in frames]
 
 
+def chapter_range(downloads, series, chapter, end_chapter):
+    first = chapter_folder(downloads, series, chapter)
+    if not end_chapter or end_chapter == chapter:
+        return [first]
+    last = chapter_folder(downloads, series, end_chapter)
+    chapters = [folder for folder in directories(first.parent)
+                if latest_strip(folder) or chapter_images(folder)]
+    if first not in chapters or last not in chapters:
+        raise ValueError("Choose available chapters.")
+    start, end = chapters.index(first), chapters.index(last)
+    if start > end:
+        raise ValueError("Choose an end chapter at or after the start chapter.")
+    return chapters[start:end + 1]
+
+
+def join_previews(clips, target):
+    if not shutil.which("ffmpeg"):
+        raise ValueError("Install FFmpeg to generate a preview.")
+    with TemporaryDirectory(dir=target.parent) as temporary:
+        work = Path(temporary)
+        # Use local aliases so chapter titles never need ffconcat escaping.
+        for index, clip in enumerate(clips):
+            (work / f"{index}.mp4").symlink_to(clip.resolve())
+        (work / "chapters.ffconcat").write_text(
+            "ffconcat version 1.0\n" + "".join(f"file {index}.mp4\n" for index in range(len(clips)))
+        )
+        subprocess.run([
+            "ffmpeg", "-v", "error", "-nostdin", "-f", "concat", "-i", "chapters.ffconcat",
+            "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart", "preview.mp4",
+        ], cwd=work, check=True, capture_output=True, text=True)
+        (work / "preview.mp4").replace(target)
+
+
 def install(app, downloads):
     lock = Lock()
     progress = None
     percent = 0
 
-    def ready(series, chapter):
+    def ready(series, chapter, *, first):
         selected = selection(downloads, series, chapter)
         if not selected["accepted"]:
             for revision in selected["revisions"][1:]:
@@ -234,16 +285,34 @@ def install(app, downloads):
         if not selected["accepted"]:
             raise ValueError("Accept the chapter in Narration first.")
         manifest = json.loads((selected["directory"] / "manifest.json").read_text())
-        key = digest([selected["key"], VOICE, SPEED, SIZE, FPS, RENDER_VERSION])
+        settings = [selected["key"], VOICE, SPEED, SIZE, FPS, RENDER_VERSION]
+        episode_one = selected["number"] == 1
+        if episode_one and not first:
+            settings.append("no opening bell")
+        key = digest(settings)
         folder = selected["folder"]
         target = folder / "Preview" / f"{key}.mp4"
-        return selected, manifest["source"], key, target
+        return selected, manifest["source"], key, target, first and episode_one
+
+    def prepare(series, chapter, end_chapter):
+        chapters = chapter_range(downloads, series, chapter, end_chapter)
+        clips = []
+        for index, folder in enumerate(chapters):
+            try:
+                clips.append(ready(series, folder.name, first=index == 0))
+            except (ValueError, OSError) as exc:
+                raise ValueError(f"{folder.name}: {exc}") from exc
+        _, _, key, target, _ = clips[0]
+        if len(clips) > 1:
+            key = digest(["chapter range", 1, [clip[2] for clip in clips]])
+            target = target.with_name(f"{key}.mp4")
+        return clips, key, target
 
     @app.get("/api/preview/chapter")
-    def preview_chapter(series: str, chapter: str, request: Request):
+    def preview_chapter(series: str, chapter: str, request: Request, end_chapter: str | None = None):
         local_request(request)
         try:
-            _, _, key, target = ready(series, chapter)
+            _, key, target = prepare(series, chapter, end_chapter)
             return {"key": key, "ready": target.is_file()}
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -260,9 +329,9 @@ def install(app, downloads):
         if not lock.acquire(blocking=False):
             raise HTTPException(409, "A preview is already rendering.")
         try:
-            selected, source, key, target = ready(body.series, body.chapter)
+            clips, key, target = prepare(body.series, body.chapter, body.end_chapter)
             if key != body.key:
-                raise HTTPException(409, "The chapter changed. Select it again.")
+                raise HTTPException(409, "The selected chapters changed. Select them again.")
             percent = 0
             progress = body.progress_id
 
@@ -271,9 +340,16 @@ def install(app, downloads):
                 percent = max(percent, value)
 
             if not target.is_file():
-                beats = [beat for reply in selected["replies"] for beat in reply["beats"]]
-                render(selected["folder"], source, beats, target, report,
-                       opening_bell=selected["number"] == 1)
+                limit = 95 if len(clips) > 1 else 100
+                for index, (selected, source, _, clip, opening_bell) in enumerate(clips):
+                    if not clip.is_file():
+                        beats = [beat for reply in selected["replies"] for beat in reply["beats"]]
+                        render(selected["folder"], source, beats, clip,
+                               lambda value: report(limit * (index * 100 + value) // (len(clips) * 100)), opening_bell=opening_bell)
+                    report(limit * (index + 1) // len(clips))
+                if len(clips) > 1:
+                    join_previews([clip[3] for clip in clips], target)
+            report(100)
             return {"key": key, "ready": True}
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -287,7 +363,8 @@ def install(app, downloads):
             lock.release()
 
     @app.get("/api/preview/video/{key}")
-    def preview_video(key: str, series: str, chapter: str, request: Request, download: bool = False):
+    def preview_video(key: str, series: str, chapter: str, request: Request,
+                      download: bool = False, end_chapter: str | None = None):
         local_request(request)
         if not re.fullmatch(r"[a-f0-9]{64}", key):
             raise HTTPException(404)
@@ -298,5 +375,6 @@ def install(app, downloads):
         path = folder / "Preview" / f"{key}.mp4"
         if not path.is_file():
             raise HTTPException(404, "Generate the preview first.")
+        title = f"{chapter} to {end_chapter}" if end_chapter and end_chapter != chapter else chapter
         return FileResponse(path, media_type="video/mp4",
-                            filename=f"{series} - {chapter}.mp4" if download else None)
+                            filename=f"{series} - {title}.mp4" if download else None)
