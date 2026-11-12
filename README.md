@@ -46,3 +46,7 @@ After stitching, open **Panels**, choose a series and chapter, and click **Detec
 Open **Narration** after saving a split. In Chrome or Brave, load the folder from **Open Extension Folder** as an unpacked extension from the browser's Extensions page. Open Google AI Studio in that browser, sign in, and use **Get Pairing Code** in Bliss to connect the AI Studio tab through the Bliss Narration extension popup.
 
 Select a chapter and choose **Start Narration** to send its saved images to AI Studio in batches. Review the finished script and choose **Accept Chapter** to update the story checkpoint. The story library is stored at `~/Library/Application Support/Bliss/Story/story.sqlite3`, outside the downloaded chapters. Bliss uses the latest accepted checkpoint before the selected chapter to build its prompt. A local test installation can set `BLISS_STORY_LIBRARY` to a separate directory.
+
+### Preview
+
+Install FFmpeg (including ffprobe), then open **Preview** and select an accepted chapter. **Generate Preview** uses Edge TTS online for Steffan at 1.2× and saves the voiceover and word timings locally for reuse. Play the resulting MP4 in Bliss or choose **Download** to save a copy.

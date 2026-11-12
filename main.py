@@ -13,6 +13,7 @@ from image_stitch import PAGE_WIDTH, stitch_chapter
 from narration import install as install_narration
 from panel_detection import detect_panels
 from panel_review import PREVIEW_ROWS, image_bytes, open_strip, read_review, save_review, stitched_series
+from recap_preview import install as install_preview
 from renumber import chapter_folder, chapter_images, directories, downloaded_series, renumber_chapter
 
 
@@ -345,4 +346,5 @@ def open_split_folder(request: SplitFolder):
 
 
 install_narration(app, DOWNLOADS)
+install_preview(app, DOWNLOADS)
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True))

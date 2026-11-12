@@ -5,6 +5,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Narration } from "./narration.jsx";
+import { RecapPreview } from "./recap-preview.jsx";
 import { Panels } from "./panels.jsx";
 import { SplitStrip } from "./split-strip.jsx";
 import { Stitch } from "./stitch.jsx";
@@ -18,13 +19,14 @@ function subscribeToStep(callback) {
 
 function currentStep() {
   const hash = window.location.hash;
-  return ["#stitch", "#panels", "#split-strip", "#narration"].includes(hash) ? hash : "#downloader";
+  return ["#stitch", "#panels", "#split-strip", "#narration", "#preview"].includes(hash) ? hash : "#downloader";
 }
 
 function DownloaderLayout() {
   const step = useSyncExternalStore(subscribeToStep, currentStep);
   const stitchSelected = step === "#stitch";
   const panelsSelected = step === "#panels";
+  const previewSelected = step === "#preview";
   const narrationSelected = step === "#narration";
   const splitSelected = step === "#split-strip";
 
@@ -47,6 +49,9 @@ function DownloaderLayout() {
           </Button>
           <Button asChild variant={narrationSelected ? "secondary" : "ghost"} className="w-full justify-start">
             <a href="#narration" aria-current={narrationSelected ? "page" : undefined}>Narration</a>
+          </Button>
+          <Button asChild variant={previewSelected ? "secondary" : "ghost"} className="w-full justify-start">
+            <a href="#preview" aria-current={previewSelected ? "page" : undefined}>Preview</a>
           </Button>
         </nav>
       </aside>
@@ -92,6 +97,11 @@ function DownloaderLayout() {
       {narrationSelected && (
         <main aria-label="Narration" className={workspaceClass}>
           <Narration />
+        </main>
+      )}
+      {previewSelected && (
+        <main aria-label="Preview" className={workspaceClass}>
+          <RecapPreview />
         </main>
       )}
       {stitchSelected && (
