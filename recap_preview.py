@@ -8,12 +8,13 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
+from urllib.request import urlopen
 from uuid import UUID
 
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from narration import digest, selection
 from panel_review import open_strip, read_review
@@ -24,6 +25,11 @@ VOICE = "en-US-SteffanNeural"
 SPEED = 1.2
 FPS = 30
 SIZE = (1280, 720)
+BELL = Path(__file__).resolve().parent / "data" / "episode-one-bell.mp3"
+BELL_URL = "https://cdn.pixabay.com/audio/2025/05/06/audio_2fd68b9a9a.mp3"
+MOVES = ("left", "right", "in", "up", "out", "down", "right", "up", "left", "out", "down", "in")
+SLIDES = {"left": (-110, 0), "right": (110, 0), "up": (0, -65), "down": (0, 65)}
+RENDER_VERSION = 4
 
 
 class PreviewRequest(BaseModel):
@@ -101,7 +107,43 @@ def audio_track(folder, script):
     return cache / "voice.wav", json.loads((cache / "words.json").read_text())
 
 
-def render(folder, source, beats, target, report):
+def panel_layers(crop):
+    width, height = SIZE
+    # Stretch a small copy across the frame and soften detail before enlarging.
+    background = crop.resize((320, 180), Image.Resampling.LANCZOS)
+    background = background.filter(ImageFilter.GaussianBlur(12)).resize(SIZE, Image.Resampling.BICUBIC)
+    canvas = Image.blend(background, Image.new("RGB", SIZE, "#f6f4f1"), 0.34)
+    foreground = ImageOps.contain(crop, (width - 112, height), Image.Resampling.LANCZOS)
+    left = (width - foreground.width) // 2
+    top = (height - foreground.height) // 2
+    shadow = Image.new("L", SIZE)
+    ImageDraw.Draw(shadow).rectangle(
+        (left, top + 10, left + foreground.width - 1, top + foreground.height + 9), fill=158
+    )
+    layer = Image.new("RGBA", SIZE, "#17131a")
+    layer.putalpha(shadow.filter(ImageFilter.GaussianBlur(16)))
+    layer.paste(foreground, (left, top))
+    return canvas, layer
+
+
+def panel_frame(background, layer, move, phase):
+    width, height = SIZE
+    eased = phase * phase * (3 - 2 * phase)
+    dx, dy = SLIDES.get(move, (0, 0))
+    scale = {"in": 1 + 0.045 * eased, "out": 1.05 - 0.05 * eased}.get(move, 1)
+    inverse = 1 / scale
+    shifted = layer.transform(
+        SIZE, Image.Transform.AFFINE,
+        (inverse, 0, width * (1 - inverse) / 2 - dx * (1 - eased) * inverse,
+         0, inverse, height * (1 - inverse) / 2 - dy * (1 - eased) * inverse),
+        Image.Resampling.BICUBIC,
+    )
+    canvas = background.copy()
+    canvas.paste(shifted, (0, 0), shifted)
+    return canvas
+
+
+def render(folder, source, beats, target, report, *, opening_bell=False):
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise ValueError("Install FFmpeg to generate a preview.")
     script, cues = spoken_track(beats)
@@ -124,22 +166,42 @@ def render(folder, source, beats, target, report):
                 raise ValueError("Save the chapter panels first.")
             for index, (panel, frame) in enumerate(frames):
                 left, top, right, bottom = boxes[int(panel[1:]) - 1]
-                with strip.image(top, bottom, left, right) as crop:
-                    fitted = ImageOps.contain(crop, SIZE, Image.Resampling.LANCZOS)
-                    with Image.new("RGB", SIZE, "#101010") as canvas:
-                        canvas.paste(fitted, ((SIZE[0] - fitted.width) // 2, (SIZE[1] - fitted.height) // 2))
-                        canvas.save(work / f"{index}.jpg", quality=93)
                 end = frames[index + 1][1] / FPS if index + 1 < len(frames) else duration
-                manifest.extend([f"file {index}.jpg", f"option framerate {FPS}",
-                                 f"duration {end - frame / FPS:.9f}"])
+                count = max(1, round(end * FPS) - frame)
+                travel = min(count - 1, 6 if index == 0 else 8)
+                move = "in" if index == 0 else MOVES[(index - 1) % len(MOVES)]
+                with strip.image(top, bottom, left, right) as crop:
+                    background, layer = panel_layers(crop)
+                for step in range(travel + 1):
+                    filename = f"{index}-{step}.jpg"
+                    with panel_frame(background, layer, move, step / travel if travel else 1) as canvas:
+                        canvas.save(work / filename, quality=93)
+                    seconds = 1 / FPS if step < travel else end - (frame + step) / FPS
+                    manifest.extend([f"file {filename}", f"option framerate {FPS}",
+                                     f"duration {seconds:.9f}"])
                 report(45 + 25 * (index + 1) // len(frames))
-        manifest.extend([f"file {len(frames) - 1}.jpg", f"option framerate {FPS}"])
+        manifest.extend([f"file {filename}", f"option framerate {FPS}"])
         (work / "panels.ffconcat").write_text("\n".join(manifest) + "\n")
+        sound_options = ["-map", "0:v", "-map", "1:a"]
+        if opening_bell:
+            bell = BELL
+            if not bell.is_file():
+                bell = work / "episode-one-bell.mp3"
+                with urlopen(BELL_URL, timeout=15) as response:
+                    bell.write_bytes(response.read(1_000_000))
+            sound_options = [
+                "-i", str(bell), "-filter_complex",
+                "[2:a]volume=0.65[bell];[1:a][bell]amix=inputs=2:duration=first:normalize=0,"
+                "alimiter=limit=0.95:level=false:latency=true[a]",
+                "-map", "0:v", "-map", "[a]",
+            ]
         with (work / "ffmpeg.log").open("w+") as errors:
             with subprocess.Popen([
                 "ffmpeg", "-v", "error", "-nostdin", "-progress", "pipe:1",
                 "-f", "concat", "-safe", "0", "-i", "panels.ffconcat", "-i", str(audio),
-                "-t", str(duration), "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",
+                *sound_options,
+                "-vf", f"fps={FPS},tpad=stop_mode=clone:stop=-1",
+                "-t", str(duration), "-c:v", "libx264", "-preset", "veryfast",
                 "-crf", "20", "-g", str(FPS * 2), "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-movflags", "+faststart", "preview.mp4",
             ], cwd=work, stdout=subprocess.PIPE, stderr=errors, text=True) as encoder:
@@ -172,7 +234,7 @@ def install(app, downloads):
         if not selected["accepted"]:
             raise ValueError("Accept the chapter in Narration first.")
         manifest = json.loads((selected["directory"] / "manifest.json").read_text())
-        key = digest([selected["key"], VOICE, SPEED, SIZE, FPS, 1])
+        key = digest([selected["key"], VOICE, SPEED, SIZE, FPS, RENDER_VERSION])
         folder = selected["folder"]
         target = folder / "Preview" / f"{key}.mp4"
         return selected, manifest["source"], key, target
@@ -210,7 +272,8 @@ def install(app, downloads):
 
             if not target.is_file():
                 beats = [beat for reply in selected["replies"] for beat in reply["beats"]]
-                render(selected["folder"], source, beats, target, report)
+                render(selected["folder"], source, beats, target, report,
+                       opening_bell=selected["number"] == 1)
             return {"key": key, "ready": True}
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

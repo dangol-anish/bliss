@@ -50,3 +50,5 @@ Select a chapter and choose **Start Narration** to send its saved images to AI S
 ### Preview
 
 Install FFmpeg (including ffprobe), then open **Preview** and select an accepted chapter. **Generate Preview** uses Edge TTS online for Steffan at 1.2× and saves the voiceover and word timings locally for reuse. Play the resulting MP4 in Bliss or choose **Download** to save a copy.
+
+Episode 1 opens with [Bell Notification by ALEXIS_GAMING_CAM](https://pixabay.com/sound-effects/film-special-effects-bell-notification-337658/), under the Pixabay Content License.
