@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Bliss Narration",
+  "version": "0.6.1",
+  "minimum_chrome_version": "120",
+  "description": "Connect an explicitly selected AI Studio tab to your local Bliss narration queue.",
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "https://aistudio.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Bliss Narration"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://aistudio.google.com/*"
+      ],
+      "js": [
+        "studio.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

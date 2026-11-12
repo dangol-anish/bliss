@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { toast } from "./notifications.js";
 import { Button } from "./ui/button";
 import { Label } from "./ui/label";
+import { NativeSelect } from "./ui/native-select";
 import { fieldControlClass } from "./ui/input";
 import { cn } from "./ui/cn.js";
 
@@ -9,10 +10,10 @@ function ChapterSelect({ id, label, options, placeholder, ...props }) {
   return (
     <div className="grid min-w-0 gap-2">
       <Label htmlFor={id}>{label}</Label>
-      <select id={id} data-slot="native-select" className={cn(fieldControlClass, !props.value && "text-muted-foreground")} {...props}>
+      <NativeSelect id={id} className={cn(fieldControlClass, "pr-8", !props.value && "text-muted-foreground")} {...props}>
         <option value="">{placeholder}</option>
         {options.map((name) => <option key={name} value={name}>{name}</option>)}
-      </select>
+      </NativeSelect>
     </div>
   );
 }

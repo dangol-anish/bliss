@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from pathlib import Path
 from threading import Lock
@@ -8,8 +9,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from downloader import DownloadCancellation, DownloadCancelled, DownloadError, download_series
-from image_stitch import stitch_chapter
+from image_stitch import PAGE_WIDTH, stitch_chapter
+from narration import install as install_narration
+from panel_detection import detect_panels
+from panel_review import PREVIEW_ROWS, image_bytes, open_strip, read_review, save_review, stitched_series
 from renumber import chapter_folder, chapter_images, directories, downloaded_series, renumber_chapter
+
+
+from strip_split import OUTPUT_DIR, save_split, split_plan
 
 
 ROOT = Path(__file__).resolve().parent
@@ -27,6 +34,7 @@ class DownloadRequest(BaseModel):
     progress_id: UUID | None = None
 
 
+@app.get("/api/panels/progress/{progress_id}")
 @app.get("/api/stitch/progress/{progress_id}")
 @app.get("/api/download/progress/{progress_id}")
 def download_progress(progress_id: UUID, response: Response):
@@ -178,4 +186,163 @@ def create_stitch(request: ChapterRange):
     return {"chapters": len(files), "files": files}
 
 
+
+class PanelDetection(ChapterSelection):
+    source: str
+    progress_id: UUID
+
+
+class PanelEdit(ChapterSelection):
+    source: str
+    boxes: list[tuple[int, int, int, int]] = Field(max_length=5000)
+
+
+def panel_metadata(strip, source, boxes):
+    return {"source": source, "height": strip.height, "width": PAGE_WIDTH,
+            "tile_height": PREVIEW_ROWS, "boxes": boxes}
+
+
+@app.get("/api/panels/series")
+def panel_series():
+    return stitched_series(DOWNLOADS)
+
+
+@app.get("/api/panels/chapter")
+def panel_chapter(series: str, chapter: str):
+    try:
+        folder = chapter_folder(DOWNLOADS, series, chapter)
+        with open_strip(folder) as (strip, source):
+            return panel_metadata(strip, source, read_review(folder, source))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/panels/tile/{index}")
+def panel_tile(index: int, series: str, chapter: str, source: str):
+    try:
+        folder = chapter_folder(DOWNLOADS, series, chapter)
+        with open_strip(folder, source) as (strip, _):
+            top = index * PREVIEW_ROWS
+            if not 0 <= top < strip.height:
+                raise HTTPException(404)
+            with strip.image(top, min(strip.height, top + PREVIEW_ROWS)) as image:
+                return Response(image_bytes(image, "JPEG", quality=90), media_type="image/jpeg",
+                                headers={"Cache-Control": "private, max-age=86400"})
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/panels/detect")
+def panel_detect(request: PanelDetection):
+    global active_progress
+    if not download_lock.acquire(blocking=False):
+        raise HTTPException(409, "Wait for the current chapter operation to finish.")
+
+    def report(percent):
+        global active_progress
+        active_progress = (request.progress_id, percent)
+
+    try:
+        report(0)
+        folder = chapter_folder(DOWNLOADS, request.series, request.chapter)
+        with open_strip(folder, request.source, exact=True) as (strip, source):
+            prior = read_review(folder, source)
+            if prior is not None:
+                return panel_metadata(strip, source, prior)
+            boxes = detect_panels(strip, ROOT / "models", report)
+            save_review(folder, source, boxes)
+            report(100)
+            return panel_metadata(strip, source, boxes)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Panel detection failed")
+        raise HTTPException(500, "Could not detect panels in this chapter.") from exc
+    finally:
+        download_lock.release()
+
+
+@app.put("/api/panels/chapter", status_code=204)
+def panel_save(request: PanelEdit):
+    if not download_lock.acquire(blocking=False):
+        raise HTTPException(409, "Wait for the current chapter operation to finish.")
+    try:
+        folder = chapter_folder(DOWNLOADS, request.series, request.chapter)
+        with open_strip(folder, request.source) as (strip, source):
+            if any(not (0 <= x1 < x2 <= PAGE_WIDTH and 0 <= y1 < y2 <= strip.height)
+                   for x1, y1, x2, y2 in request.boxes):
+                raise ValueError("One or more panels extend beyond the strip.")
+            boxes = sorted(request.boxes, key=lambda box: (box[1], box[0]))
+            save_review(folder, source, boxes)
+            return Response(status_code=204)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        logging.getLogger(__name__).exception("Could not write panel review")
+        raise HTTPException(500, "Could not save the panel review.") from exc
+    finally:
+        download_lock.release()
+
+
+class StripSplit(ChapterSelection):
+    minimum: int = Field(ge=1, le=100_000)
+    maximum: int = Field(ge=1, le=100_000)
+    preview_id: str | None = None
+
+
+def process_split(request: StripSplit, *, save=False):
+    if not download_lock.acquire(blocking=False):
+        raise HTTPException(409, "Wait for the current chapter operation to finish.")
+    try:
+        folder = chapter_folder(DOWNLOADS, request.series, request.chapter)
+        with open_strip(folder, exact=True) as (strip, source):
+            boxes = read_review(folder, source)
+            if boxes is None:
+                raise ValueError("Detect and save the chapter panels first.")
+            plan = split_plan(strip, source, boxes, request.minimum, request.maximum)
+            if save:
+                if plan["id"] != request.preview_id:
+                    raise HTTPException(409, "The chapter or panel edits changed. Preview the cuts again.")
+                plan["folder"] = str(save_split(folder, strip, boxes, plan))
+            return {**plan, "boxes": boxes, "tile_height": PREVIEW_ROWS}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        logging.getLogger(__name__).exception("Could not split the chapter strip")
+        raise HTTPException(500, "Could not split the chapter strip.") from exc
+    finally:
+        download_lock.release()
+
+
+@app.post("/api/split/preview")
+def preview_split(request: StripSplit):
+    return process_split(request)
+
+
+@app.post("/api/split/save")
+def commit_split(request: StripSplit):
+    return process_split(request, save=True)
+
+
+class SplitFolder(ChapterSelection):
+    revision: str = Field(pattern=r"^[0-9a-f]{16}$")
+
+
+@app.post("/api/split/open-folder", status_code=204)
+def open_split_folder(request: SplitFolder):
+    try:
+        chapter = chapter_folder(DOWNLOADS, request.series, request.chapter)
+        root = chapter / OUTPUT_DIR
+        folder = root / request.revision
+        if root.is_symlink() or folder.is_symlink() or not (folder / "manifest.json").is_file():
+            raise ValueError("Save the split images first.")
+        subprocess.run(["/usr/bin/open", str(folder)], check=True, capture_output=True, timeout=5)
+        return Response(status_code=204)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(500, "Could not open the split image folder.") from exc
+
+
+install_narration(app, DOWNLOADS)
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True))

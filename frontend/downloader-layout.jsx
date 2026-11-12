@@ -4,6 +4,9 @@ import { createRoot } from "react-dom/client";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { Narration } from "./narration.jsx";
+import { Panels } from "./panels.jsx";
+import { SplitStrip } from "./split-strip.jsx";
 import { Stitch } from "./stitch.jsx";
 
 const workspaceClass = "min-w-0 flex-1 px-1 py-4 sm:px-5 sm:py-6";
@@ -13,27 +16,41 @@ function subscribeToStep(callback) {
   return () => window.removeEventListener("hashchange", callback);
 }
 
-function isStitchSelected() {
-  return window.location.hash === "#stitch";
+function currentStep() {
+  const hash = window.location.hash;
+  return ["#stitch", "#panels", "#split-strip", "#narration"].includes(hash) ? hash : "#downloader";
 }
 
 function DownloaderLayout() {
-  const stitchSelected = useSyncExternalStore(subscribeToStep, isStitchSelected);
+  const step = useSyncExternalStore(subscribeToStep, currentStep);
+  const stitchSelected = step === "#stitch";
+  const panelsSelected = step === "#panels";
+  const narrationSelected = step === "#narration";
+  const splitSelected = step === "#split-strip";
 
   return (
     <>
       <aside className="w-32 shrink-0 rounded-2xl border border-white/10 bg-neutral-950/90 p-2 backdrop-blur-xl sm:w-48 sm:p-3">
         <div className="px-2.5 py-3 text-sm font-semibold">Bliss</div>
         <nav aria-label="Workflow" className="grid gap-1">
-          <Button asChild variant={stitchSelected ? "ghost" : "secondary"} className="w-full justify-start">
-            <a href="#downloader" aria-current={stitchSelected ? undefined : "page"}>Downloader</a>
+          <Button asChild variant={step === "#downloader" ? "secondary" : "ghost"} className="w-full justify-start">
+            <a href="#downloader" aria-current={step === "#downloader" ? "page" : undefined}>Downloader</a>
           </Button>
           <Button asChild variant={stitchSelected ? "secondary" : "ghost"} className="w-full justify-start">
             <a href="#stitch" aria-current={stitchSelected ? "page" : undefined}>Stitch</a>
           </Button>
+          <Button asChild variant={panelsSelected ? "secondary" : "ghost"} className="w-full justify-start">
+            <a href="#panels" aria-current={panelsSelected ? "page" : undefined}>Panels</a>
+          </Button>
+          <Button asChild variant={splitSelected ? "secondary" : "ghost"} className="w-full justify-start">
+            <a href="#split-strip" aria-current={splitSelected ? "page" : undefined}>Split Strip</a>
+          </Button>
+          <Button asChild variant={narrationSelected ? "secondary" : "ghost"} className="w-full justify-start">
+            <a href="#narration" aria-current={narrationSelected ? "page" : undefined}>Narration</a>
+          </Button>
         </nav>
       </aside>
-      <main hidden={stitchSelected} aria-label="Downloader" className={workspaceClass}>
+      <main hidden={step !== "#downloader"} aria-label="Downloader" className={workspaceClass}>
         <form id="download-form" className="grid max-w-lg gap-4">
           <div className="grid gap-2">
             <Label htmlFor="series-url">Series link</Label>
@@ -64,6 +81,19 @@ function DownloaderLayout() {
           <p id="download-status" role="status" className="text-sm text-muted-foreground" />
         </form>
       </main>
+      <main hidden={!panelsSelected} aria-label="Panels" className={`${workspaceClass} h-[calc(100dvh-1rem)] sm:h-[calc(100dvh-1.5rem)]`}>
+        <Panels active={panelsSelected} />
+      </main>
+      {splitSelected && (
+        <main aria-label="Split Strip" className={`${workspaceClass} h-[calc(100dvh-1rem)] sm:h-[calc(100dvh-1.5rem)]`}>
+          <SplitStrip />
+        </main>
+      )}
+      {narrationSelected && (
+        <main aria-label="Narration" className={workspaceClass}>
+          <Narration />
+        </main>
+      )}
       {stitchSelected && (
         <main aria-label="Stitch" className={workspaceClass}>
           <Stitch />
