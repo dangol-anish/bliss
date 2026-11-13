@@ -1,6 +1,7 @@
-import { useSyncExternalStore } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
+import { ChapterBatch } from "./chapter-batch.jsx";
 import { Backup } from "./backup.jsx";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -21,6 +22,46 @@ function subscribeToStep(callback) {
 function currentStep() {
   const hash = window.location.hash;
   return ["#stitch", "#panels", "#split-strip", "#narration", "#preview", "#backup"].includes(hash) ? hash : "#downloader";
+}
+
+function DownloadRows() {
+  const nextRow = useRef(1);
+  const [rows, setRows] = useState([0]);
+
+  return (
+    <>
+      {rows.map(id => (
+        <fieldset key={id} data-download-row className="grid min-w-0 gap-2 border-b border-white/10 pb-3">
+          <div className="flex items-end gap-2">
+            <div className="grid min-w-0 flex-1 gap-2">
+              <Label htmlFor={`series-url-${id}`}>Series link</Label>
+              <Input id={`series-url-${id}`} name="url" inputMode="url" autoComplete="off"
+                required maxLength={2048} placeholder="Webtoon or Weeb Central" />
+            </div>
+            {rows.length > 1 && (
+              <Button type="button" variant="ghost" aria-label="Remove series"
+                onClick={() => setRows(current => current.filter(row => row !== id))}>Remove</Button>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="grid min-w-0 gap-2">
+              <Label htmlFor={`chapter-start-${id}`}>From</Label>
+              <Input id={`chapter-start-${id}`} name="start" type="number" min={1} step={1} placeholder="First" />
+            </div>
+            <div className="grid min-w-0 gap-2">
+              <Label htmlFor={`chapter-end-${id}`}>To</Label>
+              <Input id={`chapter-end-${id}`} name="end" type="number" min={1} step={1} placeholder="Last" />
+            </div>
+          </div>
+        </fieldset>
+      ))}
+      <p className="text-xs text-muted-foreground">Positions count from the first listed chapter.</p>
+      <Button type="button" variant="outline" className="justify-self-start" onClick={() => {
+        const id = nextRow.current++;
+        setRows(current => [...current, id]);
+      }}>Add Series</Button>
+    </>
+  );
 }
 
 function DownloaderLayout() {
@@ -62,26 +103,8 @@ function DownloaderLayout() {
       </aside>
       <main hidden={step !== "#downloader"} aria-label="Downloader" className={workspaceClass}>
         <form id="download-form" className="grid max-w-lg gap-4">
-          <div className="grid gap-2">
-            <Label htmlFor="series-url">Series link</Label>
-            <Input id="series-url" name="url" inputMode="url" autoComplete="off"
-              required maxLength={2048} placeholder="Webtoon or Weeb Central" />
-          </div>
-          <fieldset className="min-w-0" aria-describedby="chapter-position-note">
-            <legend className="mb-3 text-sm font-medium">Chapter range</legend>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <div className="grid gap-2">
-                <Label htmlFor="chapter-start">From</Label>
-                <Input id="chapter-start" name="start" type="number" min={1} step={1} placeholder="First" />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="chapter-end">To</Label>
-                <Input id="chapter-end" name="end" type="number" min={1} step={1} placeholder="Last" />
-              </div>
-            </div>
-            <p id="chapter-position-note" className="mt-2 text-xs text-muted-foreground">
-              Positions count from the first listed chapter.
-            </p>
+          <fieldset id="download-rows" className="grid min-w-0 gap-4">
+            <DownloadRows />
           </fieldset>
           <div className="flex flex-wrap gap-2">
             <Button type="submit">Download</Button>
@@ -91,31 +114,37 @@ function DownloaderLayout() {
           <p id="download-status" role="status" className="text-sm text-muted-foreground" />
         </form>
       </main>
-      <main hidden={!panelsSelected} aria-label="Panels" className={`${workspaceClass} h-[calc(100dvh-1rem)] sm:h-[calc(100dvh-1.5rem)]`}>
-        <Panels active={panelsSelected} />
+      <main hidden={!panelsSelected} aria-label="Panels" className={`${workspaceClass} h-[calc(100dvh-4rem)] sm:h-[calc(100dvh-4.5rem)]`}>
+        <div className="mb-3"><ChapterBatch section="panels" /></div>
+          <Panels active={panelsSelected} />
       </main>
       {splitSelected && (
-        <main aria-label="Split Strip" className={`${workspaceClass} h-[calc(100dvh-1rem)] sm:h-[calc(100dvh-1.5rem)]`}>
+        <main aria-label="Split Strip" className={`${workspaceClass} h-[calc(100dvh-4rem)] sm:h-[calc(100dvh-4.5rem)]`}>
+          <div className="mb-3"><ChapterBatch section="split-strip" /></div>
           <SplitStrip />
         </main>
       )}
       {narrationSelected && (
         <main aria-label="Narration" className={workspaceClass}>
+          <div className="mb-3"><ChapterBatch section="narration" /></div>
           <Narration />
         </main>
       )}
       {previewSelected && (
         <main aria-label="Preview" className={workspaceClass}>
+          <div className="mb-3"><ChapterBatch section="preview" /></div>
           <RecapPreview />
         </main>
       )}
       {backupSelected && (
         <main aria-label="Backup" className={workspaceClass}>
+          <div className="mb-3"><ChapterBatch section="backup" /></div>
           <Backup />
         </main>
       )}
       {stitchSelected && (
         <main aria-label="Stitch" className={workspaceClass}>
+          <div className="mb-3"><ChapterBatch section="stitch" /></div>
           <Stitch />
         </main>
       )}

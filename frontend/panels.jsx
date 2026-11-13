@@ -66,6 +66,7 @@ export function Panels({ active }) {
   const [saved, setSaved] = useState(emptyBoxes);
   const [undo, setUndo] = useState([]);
   const [selected, setSelected] = useState(null);
+  const [reload, setReload] = useState(0);
   const [pending, setPending] = useState("");
   const [progress, setProgress] = useState(0);
   const [zoomIndex, setZoomIndex] = useState(0);
@@ -92,6 +93,14 @@ export function Panels({ active }) {
   }, [active]);
 
   useEffect(() => {
+    function refresh(event) {
+      if (event.detail === "panels" && !dirty) setReload(value => value + 1);
+    }
+    window.addEventListener("bliss-batch-complete", refresh);
+    return () => window.removeEventListener("bliss-batch-complete", refresh);
+  }, [dirty]);
+
+  useEffect(() => {
     if (!chapter) return;
     const controller = new AbortController();
     const params = new URLSearchParams({ series, chapter });
@@ -100,7 +109,7 @@ export function Panels({ active }) {
       .then(result => { if (!controller.signal.aborted) openReview(result); })
       .catch(error => { if (!controller.signal.aborted) toast.error(error.message); });
     return () => controller.abort();
-  }, [series, chapter]);
+  }, [series, chapter, reload]);
 
   useEffect(() => {
     if (!dirty) return;

@@ -5,6 +5,7 @@ mountDownloader();
 
 const form = document.querySelector("#download-form");
 const button = form.querySelector('button[type="submit"]');
+const rows = document.querySelector("#download-rows");
 const status = document.querySelector("#download-status");
 const cancelButton = document.querySelector("#cancel-download");
 const folderButton = document.querySelector("#open-folder");
@@ -31,14 +32,18 @@ folderButton.addEventListener("click", async () => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
-  const values = new FormData(form);
-  const start = values.get("start");
-  const end = values.get("end");
+  if (button.disabled) return;
+  const entries = Array.from(rows.querySelectorAll("[data-download-row]"), row => ({
+    url: row.querySelector('[name="url"]').value.trim(),
+    start: row.querySelector('[name="start"]').valueAsNumber || null,
+    end: row.querySelector('[name="end"]').valueAsNumber || null,
+  }));
   const progressId = crypto.randomUUID();
   const progress = new AbortController();
   let timer;
   let cancelling = false;
   button.disabled = true;
+  rows.disabled = true;
   status.textContent = "0%";
 
   async function updateProgress() {
@@ -84,15 +89,10 @@ form.addEventListener("submit", async (event) => {
   timer = setTimeout(updateProgress, 750);
 
   try {
-    const response = await fetch("/api/download", {
+    const response = await fetch("/api/download/batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: values.get("url"),
-        progress_id: progressId,
-        start: start ? Number(start) : null,
-        end: end ? Number(end) : null,
-      }),
+      body: JSON.stringify({ entries, progress_id: progressId }),
     });
     const result = await response.json();
     if (!response.ok) {
@@ -103,7 +103,7 @@ form.addEventListener("submit", async (event) => {
       return;
     }
     const label = result.chapters === 1 ? "chapter" : "chapters";
-    toast.success(`${result.chapters} ${label} downloaded`, { description: result.folder });
+    toast.success(`${result.chapters} ${label} downloaded`, { description: result.folder || `${result.series} series` });
   } catch (error) {
     toast.error("Download failed", { description: error.message });
   } finally {
@@ -112,6 +112,7 @@ form.addEventListener("submit", async (event) => {
     clearTimeout(timer);
     cancelButton.removeEventListener("click", cancelDownload);
     cancelButton.disabled = true;
+    rows.disabled = false;
     button.disabled = false;
   }
 });

@@ -12,7 +12,7 @@ from chapter_backup import move_backup
 import narration
 from studio_bridge import local_request
 
-from downloader import DownloadCancellation, DownloadCancelled, DownloadError, download_series
+from downloader import DownloadCancellation, DownloadCancelled, DownloadError, download_batch, download_series
 from image_stitch import PAGE_WIDTH, stitch_chapter
 from narration import install as install_narration
 from panel_detection import detect_panels
@@ -32,10 +32,19 @@ active_progress: tuple[UUID | None, int] = (None, 0)
 active_download: tuple[UUID | None, DownloadCancellation] | None = None
 
 
-class DownloadRequest(BaseModel):
+class DownloadEntry(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
     start: int | None = Field(default=None, ge=1)
     end: int | None = Field(default=None, ge=1)
+
+
+
+class DownloadRequest(DownloadEntry):
+    progress_id: UUID | None = None
+
+
+class BatchDownloadRequest(BaseModel):
+    entries: list[DownloadEntry] = Field(min_length=1)
     progress_id: UUID | None = None
 
 
@@ -58,22 +67,36 @@ def cancel_download(progress_id: UUID):
 
 @app.post("/api/download")
 def download(request: DownloadRequest):
+    return run_download(request.progress_id, lambda report, cancel: download_series(
+        request.url, request.start, request.end, DOWNLOADS, report_progress=report, cancellation=cancel,
+    ))
+
+
+@app.post("/api/download/batch")
+def batch_download(request: BatchDownloadRequest):
+    def run(report, cancel):
+        results = download_batch(request.entries, DOWNLOADS, report_progress=report, cancellation=cancel)
+        return {"chapters": sum(result["chapters"] for result in results),
+                "series": len({result["folder"] for result in results}),
+                "folder": results[0]["folder"] if len(results) == 1 else None}
+
+    return run_download(request.progress_id, run)
+
+
+def run_download(progress_id, operation):
     global active_download
     if not download_lock.acquire(blocking=False):
         raise HTTPException(409, "A download is already running.")
     cancellation = DownloadCancellation()
-    active_download = (request.progress_id, cancellation)
+    active_download = (progress_id, cancellation)
 
     def report_progress(percent):
         global active_progress
-        active_progress = (request.progress_id, percent)
+        active_progress = (progress_id, percent)
 
     try:
         report_progress(0)
-        return download_series(
-            request.url, request.start, request.end, DOWNLOADS,
-            report_progress=report_progress, cancellation=cancellation,
-        )
+        return operation(report_progress, cancellation)
     except DownloadCancelled:
         return {"cancelled": True}
     except ValueError as exc:
@@ -349,8 +372,22 @@ def open_split_folder(request: SplitFolder):
         raise HTTPException(500, "Could not open the split image folder.") from exc
 
 
+class BackupBatch(BaseModel):
+    entries: list[ChapterRange] = Field(min_length=1)
+
+
 @app.post("/api/backup/create")
 def backup_chapters(body: ChapterRange, request: Request):
+    result = run_backup([body], request)
+    return result[0] if isinstance(result, list) else result
+
+
+@app.post("/api/backup/batch")
+def backup_batch(body: BackupBatch, request: Request):
+    return run_backup(body.entries, request)
+
+
+def run_backup(entries, request):
     local_request(request)
     try:
         choice = subprocess.run(["/usr/bin/osascript", "-e", """
@@ -373,9 +410,20 @@ def backup_chapters(body: ChapterRange, request: Request):
         with narration.state_lock:
             if narration.active and narration.active["running"]:
                 raise HTTPException(409, "Wait for the current narration to finish.")
-            chapters = selected_chapters(body)
-            target, checkpoint = move_backup(chapters, destination)
-        return {"file": target.name, "location": str(target.parent), "checkpoint": checkpoint}
+            selections = [selected_chapters(entry) for entry in entries]
+            seen = set()
+            for chapters in selections:
+                if seen.intersection(chapters):
+                    raise ValueError("Backup ranges overlap. Select each chapter once.")
+                seen.update(chapters)
+            results = []
+            for entry, chapters in zip(entries, selections):
+                try:
+                    target, checkpoint = move_backup(chapters, destination)
+                except (ValueError, OSError) as exc:
+                    raise ValueError(f"{entry.series}: {exc} ({len(results)} archives completed.)") from exc
+                results.append({"file": target.name, "location": str(target.parent), "checkpoint": checkpoint})
+        return results
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except OSError as exc:

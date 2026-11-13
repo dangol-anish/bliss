@@ -313,6 +313,21 @@ def download_series(url, start, end, root: Path, *, report_progress=None, cancel
         return _download_series(url, start, end, root, report_progress, cancellation, created)
 
 
+def download_batch(entries, root, *, report_progress, cancellation):
+    results = []
+    with download_files(cancellation) as created:
+        for index, entry in enumerate(entries):
+            def report(percent):
+                report_progress((100 * index + percent) // len(entries))
+
+            try:
+                result = _download_series(entry.url, entry.start, entry.end, root, report, cancellation, created)
+            except (DownloadError, ValueError) as exc:
+                raise type(exc)(f"Series {index + 1}: {exc}") from exc
+            results.append(result)
+    return results
+
+
 def _download_series(url, start, end, root, report_progress, cancellation, created):
     cancellation.check()
     url = url.strip()

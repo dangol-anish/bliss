@@ -33,6 +33,14 @@ export function Narration() {
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
+    function refresh(event) {
+      if (event.detail === "narration") setReload(value => value + 1);
+    }
+    window.addEventListener("bliss-batch-complete", refresh);
+    return () => window.removeEventListener("bliss-batch-complete", refresh);
+  }, []);
+
+  useEffect(() => {
     const controller = new AbortController();
     request("/api/panels/series", undefined, controller.signal).then(setCatalog)
       .catch(err => { if (!controller.signal.aborted) toast.error(err.message); });

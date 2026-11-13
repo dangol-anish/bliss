@@ -20,10 +20,19 @@ export function RecapPreview() {
   const [series, setSeries] = useState(() => params.get("series") ?? "");
   const [chapter, setChapter] = useState(() => params.get("chapter") ?? "");
   const [endChapter, setEndChapter] = useState(() => params.get("end_chapter") ?? params.get("chapter") ?? "");
+  const [reload, setReload] = useState(0);
   const [details, setDetails] = useState(null);
   const [error, setError] = useState("");
   const [progressId, setProgressId] = useState(null);
   const [percent, setPercent] = useState(0);
+
+  useEffect(() => {
+    function refresh(event) {
+      if (event.detail === "preview") setReload(value => value + 1);
+    }
+    window.addEventListener("bliss-batch-complete", refresh);
+    return () => window.removeEventListener("bliss-batch-complete", refresh);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -40,7 +49,7 @@ export function RecapPreview() {
       .then(result => { if (!controller.signal.aborted) setDetails(result); })
       .catch(err => { if (!controller.signal.aborted) setError(err.message); });
     return () => controller.abort();
-  }, [chapter, query, savedPreview]);
+  }, [chapter, query, savedPreview, reload]);
 
   useEffect(() => {
     if (!progressId) return;
