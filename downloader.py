@@ -1,6 +1,7 @@
 """Download publicly available chapters from Webtoon and Weeb Central."""
 import json
 import re
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
@@ -24,6 +25,7 @@ WEEB = frozenset({"weebcentral.com", "www.weebcentral.com"})
 WEBTOON_IMAGES = WEBTOON | {"webtoon-phinf.pstatic.net"}
 WEEB_IMAGES = WEEB | {"hot.planeptune.us", "scans.lastation.us", "official.lowee.us"}
 WEEB_ID = r"[0-9A-HJKMNP-TV-Z]{26}"
+WEBTOON_IMAGE_WORKERS = 3
 WEBTOON_ROOT = "https://www.webtoons.com"
 WEEB_ROOT = "https://weebcentral.com"
 
@@ -328,6 +330,47 @@ def download_batch(entries, root, *, report_progress, cancellation):
     return results
 
 
+def download_pages(images, staging, hosts, referer, is_webtoon, cancellation, report):
+    def download_page(number, url):
+        cancellation.check()
+        data = fetch(url, hosts, referer, limit=40 * 1024 * 1024, cancellation=cancellation)
+        cancellation.check()
+        save_image(data, staging / f"{number:04d}", is_webtoon)
+
+    workers = WEBTOON_IMAGE_WORKERS if is_webtoon else 1
+    pages = enumerate(images, 1)
+    if workers == 1:
+        for number, url in pages:
+            download_page(number, url)
+            if number < len(images):
+                report(number / len(images))
+        return
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = set()
+        try:
+            for _ in range(workers):
+                page = next(pages, None)
+                if page is not None:
+                    pending.add(pool.submit(download_page, *page))
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    future.result()
+                cancellation.check()
+                completed += len(done)
+                if completed < len(images):
+                    report(completed / len(images))
+                for _ in done:
+                    page = next(pages, None)
+                    if page is not None:
+                        pending.add(pool.submit(download_page, *page))
+        finally:
+            for future in pending:
+                future.cancel()
+
+
 def _download_series(url, start, end, root, report_progress, cancellation, created):
     cancellation.check()
     url = url.strip()
@@ -365,14 +408,7 @@ def _download_series(url, start, end, root, report_progress, cancellation, creat
                 staging = Path(temp) / "pages"
                 staging.mkdir()
                 images = chapter_images(chapter, is_webtoon, cancellation=cancellation)
-                for number, image_url in enumerate(images, 1):
-                    cancellation.check()
-                    data = fetch(image_url, hosts, referer, limit=40 * 1024 * 1024,
-                                 cancellation=cancellation)
-                    cancellation.check()
-                    save_image(data, staging / f"{number:04d}", is_webtoon)
-                    if number < len(images):
-                        report(number / len(images))
+                download_pages(images, staging, hosts, referer, is_webtoon, cancellation, report)
                 (staging / ".bliss-chapter").write_text(identity)
                 cancellation.check()
                 staging.rename(target)
