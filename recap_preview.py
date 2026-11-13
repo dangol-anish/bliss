@@ -269,8 +269,9 @@ def join_previews(clips, target):
         (work / "preview.mp4").replace(target)
 
 
-def install(app, downloads):
-    lock = Lock()
+def install(app, downloads, *, lock=None):
+    if lock is None:
+        lock = Lock()
     progress = None
     percent = 0
 
@@ -327,7 +328,7 @@ def install(app, downloads):
         nonlocal progress, percent
         local_request(request)
         if not lock.acquire(blocking=False):
-            raise HTTPException(409, "A preview is already rendering.")
+            raise HTTPException(409, "Wait for the current chapter operation to finish.")
         try:
             clips, key, target = prepare(body.series, body.chapter, body.end_chapter)
             if key != body.key:

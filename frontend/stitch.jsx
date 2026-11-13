@@ -6,7 +6,7 @@ import { NativeSelect } from "./ui/native-select";
 import { fieldControlClass } from "./ui/input";
 import { cn } from "./ui/cn.js";
 
-function ChapterSelect({ id, label, options, placeholder, ...props }) {
+export function ChapterSelect({ id, label, options, placeholder, ...props }) {
   return (
     <div className="grid min-w-0 gap-2">
       <Label htmlFor={id}>{label}</Label>

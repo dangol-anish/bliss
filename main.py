@@ -4,9 +4,13 @@ from pathlib import Path
 from threading import Lock
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from chapter_backup import move_backup
+import narration
+from studio_bridge import local_request
 
 from downloader import DownloadCancellation, DownloadCancelled, DownloadError, download_series
 from image_stitch import PAGE_WIDTH, stitch_chapter
@@ -345,6 +349,42 @@ def open_split_folder(request: SplitFolder):
         raise HTTPException(500, "Could not open the split image folder.") from exc
 
 
+@app.post("/api/backup/create")
+def backup_chapters(body: ChapterRange, request: Request):
+    local_request(request)
+    try:
+        choice = subprocess.run(["/usr/bin/osascript", "-e", """
+            try
+                return POSIX path of (choose folder with prompt "Choose where to move the chapter backup")
+            on error number -128
+                return ""
+            end try
+        """], check=True, capture_output=True, text=True).stdout.rstrip("\n")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(500, "Could not open the destination picker.") from exc
+    if not choice:
+        return Response(status_code=204)
+    destination = Path(choice).resolve()
+    if destination.is_relative_to(DOWNLOADS.resolve()):
+        raise HTTPException(400, "Choose a folder outside Bliss downloads.")
+    if not download_lock.acquire(blocking=False):
+        raise HTTPException(409, "Wait for the current chapter operation to finish.")
+    try:
+        with narration.state_lock:
+            if narration.active and narration.active["running"]:
+                raise HTTPException(409, "Wait for the current narration to finish.")
+            chapters = selected_chapters(body)
+            target, checkpoint = move_backup(chapters, destination)
+        return {"file": target.name, "location": str(target.parent), "checkpoint": checkpoint}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except OSError as exc:
+        logging.exception("Could not archive the selected chapters")
+        raise HTTPException(500, "Could not finish moving the chapters. Check the destination and available space.") from exc
+    finally:
+        download_lock.release()
+
+
 install_narration(app, DOWNLOADS)
-install_preview(app, DOWNLOADS)
+install_preview(app, DOWNLOADS, lock=download_lock)
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True))

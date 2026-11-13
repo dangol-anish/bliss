@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
+import { Backup } from "./backup.jsx";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -19,7 +20,7 @@ function subscribeToStep(callback) {
 
 function currentStep() {
   const hash = window.location.hash;
-  return ["#stitch", "#panels", "#split-strip", "#narration", "#preview"].includes(hash) ? hash : "#downloader";
+  return ["#stitch", "#panels", "#split-strip", "#narration", "#preview", "#backup"].includes(hash) ? hash : "#downloader";
 }
 
 function DownloaderLayout() {
@@ -28,6 +29,7 @@ function DownloaderLayout() {
   const panelsSelected = step === "#panels";
   const previewSelected = step === "#preview";
   const narrationSelected = step === "#narration";
+  const backupSelected = step === "#backup";
   const splitSelected = step === "#split-strip";
 
   return (
@@ -52,6 +54,9 @@ function DownloaderLayout() {
           </Button>
           <Button asChild variant={previewSelected ? "secondary" : "ghost"} className="w-full justify-start">
             <a href="#preview" aria-current={previewSelected ? "page" : undefined}>Preview</a>
+          </Button>
+          <Button asChild variant={backupSelected ? "secondary" : "ghost"} className="w-full justify-start">
+            <a href="#backup" aria-current={backupSelected ? "page" : undefined}>Backup</a>
           </Button>
         </nav>
       </aside>
@@ -102,6 +107,11 @@ function DownloaderLayout() {
       {previewSelected && (
         <main aria-label="Preview" className={workspaceClass}>
           <RecapPreview />
+        </main>
+      )}
+      {backupSelected && (
+        <main aria-label="Backup" className={workspaceClass}>
+          <Backup />
         </main>
       )}
       {stitchSelected && (
