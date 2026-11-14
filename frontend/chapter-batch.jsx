@@ -23,7 +23,6 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
   const [results, setResults] = useState([]);
-  const [review, setReview] = useState(null);
   const [minimum, setMinimum] = useState(1200);
   const [maximum, setMaximum] = useState(3000);
 
@@ -48,7 +47,7 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
   }
 
   function start(action) {
-    if (running.current || review) return;
+    if (running.current) return;
     const items = new Map();
     for (const { series, chapter, end_chapter } of rows) {
       const chapters = catalog.find(entry => entry.name === series)?.chapters ?? [];
@@ -105,15 +104,14 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
         const report = value => setProgress(`${index + 1}/${queue.length} · ${label} · ${Math.floor(value)}%`);
         report(0);
         const result = await runBatchItem(action, current, { minimum, maximum }, report, () => stop.current);
-        if (!stop.current && result?.review) {
-          setReview({ ...result, label, queue, index });
-          return;
-        }
         if (result?.watch) setResults(previous => [...previous, { label, ...result }]);
       }
       if (stop.current) toast.info("Batch stopped");
       else toast.success("Batch complete");
     } catch (failure) {
+      if (action === "narrate" && !stop.current && !failure.alertPlayed) {
+        batchRequest("/api/narration/alert", {}).catch(() => {});
+      }
       setError(action === "backup" ? failure.message : `${itemName(current)} — ${failure.message}`);
     } finally {
       running.current = false;
@@ -122,24 +120,6 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
       setProgress("");
       window.dispatchEvent(new CustomEvent("bliss-batch-complete", { detail: section }));
     }
-  }
-
-  async function accept() {
-    if (running.current) return;
-    running.current = true;
-    setBusy(true);
-    setError("");
-    try {
-      await batchRequest("/api/narration/accept", review.payload);
-    } catch (failure) {
-      setError(failure.message);
-      return;
-    } finally {
-      running.current = false;
-      setBusy(false);
-    }
-    setReview(null);
-    advance("narrate", review.queue, review.index + 1);
   }
 
   function close(event) {
@@ -160,59 +140,47 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
             <h2 id={`${section}-batch-title`} className="text-sm font-semibold">Batch chapters</h2>
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => close()}>Close</Button>
           </div>
-          {!review && (
-            <>
-              {rows.map(row => {
-                const chapters = catalog.find(item => item.name === row.series)?.chapters ?? [];
-                const id = `${section}-batch-${row.id}`;
-                return (
-                  <div key={row.id} className="grid grid-cols-2 items-end gap-2 border-b border-white/10 pb-3 sm:grid-cols-[2fr_1fr_1fr_auto]">
-                    <ChapterSelect id={`${id}-series`} label="Series" placeholder="Choose series"
-                      options={catalog.map(item => item.name)} value={row.series} disabled={busy}
-                      onChange={event => update(row.id, { series: event.target.value, chapter: "", end_chapter: "" })} />
-                    <ChapterSelect id={`${id}-from`} label="From" placeholder="Choose chapter"
-                      options={chapters} value={row.chapter} disabled={busy || !row.series}
-                      onChange={event => update(row.id, { chapter: event.target.value, end_chapter: "" })} />
-                    <ChapterSelect id={`${id}-to`} label="To" placeholder={row.chapter || "Choose chapter"}
-                      options={row.chapter ? chapters.slice(chapters.indexOf(row.chapter)) : []}
-                      value={row.end_chapter} disabled={busy || !row.chapter}
-                      onChange={event => update(row.id, { end_chapter: event.target.value })} />
-                    {rows.length > 1 && <Button type="button" variant="ghost" disabled={busy}
-                      onClick={() => setRows(current => current.filter(item => item.id !== row.id))}>Remove</Button>}
-                  </div>
-                );
-              })}
-              {section === "split-strip" && <div className="grid grid-cols-2 gap-2">
-                <div className="grid gap-2"><Label htmlFor="batch-min">Min height (px)</Label>
-                  <Input id="batch-min" type="number" min={1} max={100000} value={minimum} disabled={busy}
-                    onChange={event => setMinimum(Number(event.target.value))} /></div>
-                <div className="grid gap-2"><Label htmlFor="batch-max">Max height (px)</Label>
-                  <Input id="batch-max" type="number" min={1} max={100000} value={maximum} disabled={busy}
-                    onChange={event => setMaximum(Number(event.target.value))} /></div>
-              </div>}
-              <div className="flex flex-wrap gap-2">
-                <Button type="button" variant="outline" disabled={busy || !catalog.length} onClick={() => {
-                  const id = nextId.current++;
-                  setRows(current => [...current, { id, series: "", chapter: "", end_chapter: "" }]);
-                }}>Add Series</Button>
-                {config.actions.map(([action, label]) => <Button type="button" key={action}
-                  disabled={busy || rows.some(row => !row.chapter)} onClick={() => start(action)}>{label}</Button>)}
-                {busy && section !== "backup" && <Button type="button" variant="ghost"
-                  disabled={stopping} onClick={() => { stop.current = true; setStopping(true); }}>
-                  {stopping ? "Stopping…" : "Stop Batch"}</Button>}
+          {rows.map(row => {
+            const entry = catalog.find(item => item.name === row.series);
+            const chapters = entry?.chapters ?? [];
+            const range = entry?.ranges?.find(group => group.includes(row.chapter)) ?? chapters;
+            const id = `${section}-batch-${row.id}`;
+            return (
+              <div key={row.id} className="grid grid-cols-2 items-end gap-2 border-b border-white/10 pb-3 sm:grid-cols-[2fr_1fr_1fr_auto]">
+                <ChapterSelect id={`${id}-series`} label="Series" placeholder="Choose series"
+                  options={catalog.map(item => item.name)} value={row.series} disabled={busy}
+                  onChange={event => update(row.id, { series: event.target.value, chapter: "", end_chapter: "" })} />
+                <ChapterSelect id={`${id}-from`} label="From" placeholder="Choose chapter"
+                  options={chapters} value={row.chapter} disabled={busy || !row.series}
+                  onChange={event => update(row.id, { chapter: event.target.value, end_chapter: "" })} />
+                <ChapterSelect id={`${id}-to`} label="To" placeholder={row.chapter || "Choose chapter"}
+                  options={row.chapter ? range.slice(range.indexOf(row.chapter)) : []}
+                  value={row.end_chapter} disabled={busy || !row.chapter}
+                  onChange={event => update(row.id, { end_chapter: event.target.value })} />
+                {rows.length > 1 && <Button type="button" variant="ghost" disabled={busy}
+                  onClick={() => setRows(current => current.filter(item => item.id !== row.id))}>Remove</Button>}
               </div>
-            </>
-          )}
-          {review && (
-            <>
-              <p className="text-sm">{review.label}</p>
-              <div className="max-h-[45vh] overflow-auto whitespace-pre-wrap rounded-md border border-white/15 p-3 text-sm">{review.review}</div>
-              <div className="flex flex-wrap gap-2">
-                <Button type="button" disabled={busy} onClick={accept}>Accept & Continue</Button>
-                <Button type="button" variant="outline" disabled={busy} onClick={() => setReview(null)}>End Batch</Button>
-              </div>
-            </>
-          )}
+            );
+          })}
+          {section === "split-strip" && <div className="grid grid-cols-2 gap-2">
+            <div className="grid gap-2"><Label htmlFor="batch-min">Min height (px)</Label>
+              <Input id="batch-min" type="number" min={1} max={100000} value={minimum} disabled={busy}
+                onChange={event => setMinimum(Number(event.target.value))} /></div>
+            <div className="grid gap-2"><Label htmlFor="batch-max">Max height (px)</Label>
+              <Input id="batch-max" type="number" min={1} max={100000} value={maximum} disabled={busy}
+                onChange={event => setMaximum(Number(event.target.value))} /></div>
+          </div>}
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" disabled={busy || !catalog.length} onClick={() => {
+              const id = nextId.current++;
+              setRows(current => [...current, { id, series: "", chapter: "", end_chapter: "" }]);
+            }}>Add Series</Button>
+            {config.actions.map(([action, label]) => <Button type="button" key={action}
+              disabled={busy || rows.some(row => !row.chapter)} onClick={() => start(action)}>{label}</Button>)}
+            {busy && section !== "backup" && <Button type="button" variant="ghost"
+              disabled={stopping} onClick={() => { stop.current = true; setStopping(true); }}>
+              {stopping ? "Stopping…" : "Stop Batch"}</Button>}
+          </div>
           {progress && <p role="status" className="text-sm text-muted-foreground">{progress}</p>}
           {error && <p role="alert" className="text-sm">{error}</p>}
           {results.map(item => <div key={item.watch ?? item.label} className="grid gap-1 text-sm">

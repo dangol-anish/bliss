@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 from threading import Event, Lock, Thread
 from time import monotonic
 
@@ -119,6 +120,17 @@ def available_splits(folder, source, boxes):
         except (OSError, KeyError, TypeError, ValueError):
             continue
     return sorted(revisions, reverse=True)
+
+
+def accepted_selection(downloads, series, chapter):
+    selected = selection(downloads, series, chapter)
+    if selected["accepted"]:
+        return selected
+    for revision in selected["revisions"][1:]:
+        candidate = selection(downloads, series, chapter, revision["id"])
+        if candidate["accepted"]:
+            return candidate
+    raise ValueError("Finish the chapter in Narration first.")
 
 
 def selection(downloads, series, chapter, revision=None):
@@ -358,9 +370,10 @@ def run_queue(downloads, selected):
         return current
 
     try:
-        hello = command("hello")
-        if hello.get("protocol") != 5:
-            raise RuntimeError("Reload the Bliss Narration extension and reconnect the AI Studio tab.")
+        if len(replies) < len(selected["batches"]):
+            hello = command("hello")
+            if hello.get("protocol") != 5:
+                raise RuntimeError("Reload the Bliss Narration extension and reconnect the AI Studio tab.")
         for index in range(len(replies), len(selected["batches"])):
             current_selection()
             receipt, prompt, ids = receipt_and_prompt(selected, index, replies)
@@ -380,12 +393,19 @@ def run_queue(downloads, selected):
             replies.append(result)
             save_draft(key, replies, False)
             update(completed=len(replies), message="Batch saved")
-        update(status="complete", message="Review the narration, then accept the chapter.")
+        if cancel.is_set():
+            raise InterruptedError("Narration stopped.")
+        save_checkpoint(current_selection())
+        update(status="complete", message="Narration saved. Story checkpoint updated.")
+    except InterruptedError:
+        update(status="stopped", message="Narration stopped.")
     except (RuntimeError, ValueError, OSError, sqlite3.Error) as exc:
         update(status="paused", message=str(exc))
+        play_pause_sound()
     except Exception:
         logging.exception("Narration queue failed")
         update(status="paused", message="Narration paused. Check the AI Studio tab before retrying.")
+        play_pause_sound()
     finally:
         with state_lock:
             active["running"] = False
@@ -396,11 +416,11 @@ def start_queue(downloads, selected, retry):
     with state_lock:
         if active and active["running"]:
             raise HTTPException(409, "A narration queue is already running.")
-        if selected["accepted"] or len(selected["replies"]) == len(selected["batches"]):
+        if selected["accepted"]:
             raise ValueError("This chapter's narration is already complete.")
         if selected["submitted"] and not retry:
             raise ValueError("Check the last AI Studio request and confirm that you want to send this batch again.")
-        if not studio_bridge.connection_view()["connected"]:
+        if len(selected["replies"]) < len(selected["batches"]) and not studio_bridge.connection_view()["connected"]:
             raise ValueError("Connect the Bliss extension to your AI Studio tab first.")
         cancel.clear()
         active = {"running": True, "status": "running", "message": "Connecting to AI Studio",
@@ -408,21 +428,27 @@ def start_queue(downloads, selected, retry):
         Thread(target=run_queue, args=(downloads, selected), daemon=True).start()
 
 
-def accept_chapter(selected):
+def play_pause_sound():
+    try:
+        subprocess.Popen(["/usr/bin/afplay", "/System/Library/Sounds/Sosumi.aiff"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        logging.warning("Could not play narration pause sound.", exc_info=True)
+
+
+def save_checkpoint(selected):
     if selected["submitted"] or len(selected["replies"]) != len(selected["batches"]):
-        raise ValueError("Finish all narration batches before accepting the chapter.")
+        raise ValueError("Finish all narration batches before saving the checkpoint.")
     context = story_context(selected["checkpoint"], selected["chapter"], selected["replies"])
     if not any(beat["narration"].strip() for reply in selected["replies"] for beat in reply["beats"]):
-        raise ValueError("This chapter has no spoken narration to accept.")
+        raise ValueError("This chapter has no spoken narration to save.")
     context.pop("revision", None)
     context.pop("chapter", None)
-    with state_lock, library() as db:
-        if active and active["running"]:
-            raise HTTPException(409, "Wait for the running narration queue to finish.")
+    with library() as db:
         db.execute("BEGIN IMMEDIATE")
         current = checkpoint_before(db, selected["series_id"], selected["number"])
         if (current["revision"] if current else None) != selected["parent"]:
-            raise ValueError("The earlier story checkpoint changed. Reopen this chapter before accepting.")
+            raise ValueError("The earlier story checkpoint changed. Reopen this chapter before continuing.")
         db.execute("""INSERT OR IGNORE INTO checkpoints (series, chapter, number, parent, draft, payload)
             VALUES (?, ?, ?, ?, ?, ?)""",
             (selected["series_id"], selected["chapter"], str(selected["number"]), selected["parent"],
@@ -467,6 +493,12 @@ def install(app, downloads):
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @router.post("/alert")
+    def alert(request: Request):
+        studio_bridge.local_request(request)
+        play_pause_sound()
+        return {"played": True}
+
     @router.post("/stop")
     def stop(request: Request):
         studio_bridge.local_request(request)
@@ -474,16 +506,6 @@ def install(app, downloads):
             if active and active["running"]:
                 cancel.set()
         return {"stopping": True}
-
-    @router.post("/accept")
-    def accept(body: NarrationSelection, request: Request):
-        studio_bridge.local_request(request)
-        try:
-            selected = load_checked(body)
-            accept_chapter(selected)
-            return view(selection(downloads, body.series, body.chapter, body.revision))
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
 
     app.include_router(studio_bridge.router)
     app.include_router(router)

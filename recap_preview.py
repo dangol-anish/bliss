@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-from narration import digest, selection
+from narration import accepted_selection, digest
 from panel_review import latest_strip, open_strip, read_review
 from renumber import chapter_folder, chapter_images, directories
 from studio_bridge import local_request
@@ -276,15 +276,7 @@ def install(app, downloads, *, lock=None):
     percent = 0
 
     def ready(series, chapter, *, first):
-        selected = selection(downloads, series, chapter)
-        if not selected["accepted"]:
-            for revision in selected["revisions"][1:]:
-                candidate = selection(downloads, series, chapter, revision["id"])
-                if candidate["accepted"]:
-                    selected = candidate
-                    break
-        if not selected["accepted"]:
-            raise ValueError("Accept the chapter in Narration first.")
+        selected = accepted_selection(downloads, series, chapter)
         manifest = json.loads((selected["directory"] / "manifest.json").read_text())
         settings = [selected["key"], VOICE, SPEED, SIZE, FPS, RENDER_VERSION]
         episode_one = selected["number"] == 1

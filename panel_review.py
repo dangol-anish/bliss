@@ -109,13 +109,17 @@ class Strip:
         return result
 
 
+def strip_source(path):
+    stat = path.stat()
+    return sha256(f"{path.name}/{stat.st_size}/{stat.st_mtime_ns}".encode()).hexdigest()[:20]
+
+
 @contextmanager
 def open_strip(folder, expected=None, *, exact=False):
     path = latest_strip(folder)
     if path is None:
         raise ValueError("Stitch this chapter first.")
-    stat = path.stat()
-    source = sha256(f"{path.name}/{stat.st_size}/{stat.st_mtime_ns}".encode()).hexdigest()[:20]
+    source = strip_source(path)
     if expected is not None and expected != source:
         raise ValueError("The stitched chapter changed. Reopen it to continue.")
     with pymupdf.open(path) as pdf:

@@ -36,7 +36,7 @@ export function RecapPreview() {
 
   useEffect(() => {
     const controller = new AbortController();
-    request("/api/panels/series", { signal: controller.signal }).then(setCatalog)
+    request("/api/preview/series", { signal: controller.signal }).then(setCatalog)
       .catch(err => { if (!controller.signal.aborted) toast.error(err.message); });
     return () => controller.abort();
   }, []);
@@ -104,7 +104,8 @@ export function RecapPreview() {
   }
 
   const chapters = catalog.find(item => item.name === series)?.chapters ?? [];
-  const endOptions = chapters.slice(Math.max(0, chapters.indexOf(chapter)));
+  const contiguous = catalog.find(item => item.name === series)?.ranges.find(range => range.includes(chapter)) ?? [];
+  const endOptions = contiguous.slice(Math.max(0, contiguous.indexOf(chapter)));
   const videoKey = /^[a-f0-9]{64}$/.test(savedPreview) ? savedPreview : details?.ready ? details.key : "";
   const video = videoKey && series && chapter ? `/api/preview/video/${videoKey}?${query}` : "";
   return (
@@ -123,7 +124,7 @@ export function RecapPreview() {
           <NativeSelect id="preview-chapter" className={selectStyle} value={chapter} disabled={!series || !!progressId}
             onChange={event => {
               const nextChapter = event.target.value;
-              const keepEnd = nextChapter && endChapter !== chapter && chapters.indexOf(endChapter) >= chapters.indexOf(nextChapter);
+              const keepEnd = nextChapter && endChapter !== chapter && contiguous.includes(nextChapter) && contiguous.indexOf(endChapter) >= contiguous.indexOf(nextChapter);
               select(series, nextChapter, keepEnd ? endChapter : nextChapter);
             }}>
             <option value="">Select chapter</option>

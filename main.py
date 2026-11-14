@@ -16,7 +16,7 @@ from downloader import DownloadCancellation, DownloadCancelled, DownloadError, d
 from image_stitch import PAGE_WIDTH, stitch_chapter
 from narration import install as install_narration
 from panel_detection import detect_panels
-from panel_review import PREVIEW_ROWS, image_bytes, open_strip, read_review, save_review, stitched_series
+from panel_review import PREVIEW_ROWS, image_bytes, open_strip, read_review, save_review, stitched_series, latest_strip, strip_source
 from recap_preview import install as install_preview
 from renumber import chapter_folder, chapter_images, directories, downloaded_series, renumber_chapter
 
@@ -233,6 +233,58 @@ def panel_metadata(strip, source, boxes):
 @app.get("/api/panels/series")
 def panel_series():
     return stitched_series(DOWNLOADS)
+
+
+def ready_series(stage):
+    result = []
+    for series in directories(DOWNLOADS):
+        chapters = []
+        ranges = []
+        contiguous = []
+        for folder in directories(series):
+            try:
+                path = latest_strip(folder)
+                if path is None and not chapter_images(folder):
+                    continue
+                source = strip_source(path) if path is not None else None
+                boxes = read_review(folder, source) if source is not None else None
+                if boxes is None:
+                    raise ValueError("Missing panels")
+                if stage != "split":
+                    narration.identify(folder)
+                    if not narration.available_splits(folder, source, boxes):
+                        raise ValueError("Missing split images")
+                if stage == "preview":
+                    narration.accepted_selection(DOWNLOADS, series.name, folder.name)
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                contiguous = []
+                continue
+            chapters.append(folder.name)
+            if not contiguous:
+                contiguous = []
+                ranges.append(contiguous)
+            contiguous.append(folder.name)
+        if chapters:
+            entry = {"name": series.name, "chapters": chapters}
+            if stage == "preview":
+                entry["ranges"] = ranges
+            result.append(entry)
+    return result
+
+
+@app.get("/api/split/series")
+def split_series():
+    return ready_series("split")
+
+
+@app.get("/api/narration/series")
+def narration_series():
+    return ready_series("narration")
+
+
+@app.get("/api/preview/series")
+def preview_series():
+    return ready_series("preview")
 
 
 @app.get("/api/panels/chapter")

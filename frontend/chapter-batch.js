@@ -40,9 +40,9 @@ export async function runWithProgress(path, payload, progressPath, report) {
 export const batchSections = {
   stitch: { catalog: "stitch", actions: [["renumber", "Renumber"], ["create", "Stitch"]] },
   panels: { catalog: "panels", actions: [["detect", "Detect Panels"]], perChapter: true },
-  "split-strip": { catalog: "panels", actions: [["split", "Split & Save"]], perChapter: true },
-  narration: { catalog: "panels", actions: [["narrate", "Start Narration"]], perChapter: true },
-  preview: { catalog: "panels", actions: [["render", "Render Previews"]] },
+  "split-strip": { catalog: "split", actions: [["split", "Split & Save"]], perChapter: true },
+  narration: { catalog: "narration", actions: [["narrate", "Start Narration"]], perChapter: true },
+  preview: { catalog: "preview", actions: [["render", "Render Previews"]] },
   backup: { catalog: "stitch", actions: [["backup", "Move to Backup"]] },
 };
 
@@ -76,33 +76,26 @@ export async function runBatchItem(action, item, settings, report, stopped) {
       return { watch: `/?${query}#preview`, download: `/api/preview/video/${details.key}?${new URLSearchParams(item)}&download=true` };
     }
     case "narrate": {
-      let details = await batchRequest(`/api/narration/chapter?${query}`);
+      const details = await batchRequest(`/api/narration/chapter?${query}`);
       if (details.accepted || stopped()) return;
-      const payload = { ...item, key: details.key, revision: details.revision };
       if (details.submitted) throw new Error("Check the last AI Studio request in Narration before retrying.");
-      if (details.completed < details.total) {
-        await batchRequest("/api/narration/start", payload);
-        while (true) {
-          if (stopped()) {
-            await batchRequest("/api/narration/stop", {});
-            return;
-          }
-          const job = await batchRequest("/api/narration/job");
-          if (job?.key !== details.key) throw new Error("The narration job changed. Check Narration.");
-          if (!job.running) {
-            if (job.status !== "complete") throw new Error(job.message || "Narration paused.");
-            break;
-          }
-          report(100 * job.completed / job.total);
-          await new Promise(resolve => setTimeout(resolve, 1000));
+      await batchRequest("/api/narration/start", { ...item, key: details.key, revision: details.revision });
+      while (true) {
+        if (stopped()) {
+          await batchRequest("/api/narration/stop", {});
+          return;
         }
-        query.set("revision", payload.revision);
-        details = await batchRequest(`/api/narration/chapter?${query}`);
+        const job = await batchRequest("/api/narration/job");
+        if (job?.key !== details.key) throw new Error("The narration job changed. Check Narration.");
+        if (!job.running) {
+          if (job.status === "complete") return;
+          const error = new Error(job.message || "Narration paused.");
+          error.alertPlayed = job.status === "paused";
+          throw error;
+        }
+        report(100 * job.completed / job.total);
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
-      if (details.completed !== details.total || details.submitted || !details.script) {
-        throw new Error("Finish the narration batches before accepting this chapter.");
-      }
-      return { review: details.script, payload };
     }
   }
 }

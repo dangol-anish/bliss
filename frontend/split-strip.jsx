@@ -18,7 +18,7 @@ export function SplitStrip() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/panels/series", { signal: controller.signal })
+    fetch("/api/split/series", { signal: controller.signal })
       .then(response => {
         if (!response.ok) throw new Error("Could not load stitched chapters.");
         return response.json();

@@ -42,7 +42,7 @@ export function Narration() {
 
   useEffect(() => {
     const controller = new AbortController();
-    request("/api/panels/series", undefined, controller.signal).then(setCatalog)
+    request("/api/narration/series", undefined, controller.signal).then(setCatalog)
       .catch(err => { if (!controller.signal.aborted) toast.error(err.message); });
     return () => controller.abort();
   }, []);
@@ -95,6 +95,7 @@ export function Narration() {
       after?.(await request(path, body));
     } catch (err) {
       toast.error(err.message);
+      if (path === "/api/narration/start") request("/api/narration/alert", {}).catch(() => {});
     } finally {
       setBusy(false);
     }
@@ -168,17 +169,12 @@ export function Narration() {
             </label>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            {!finished && !running && <Button disabled={!connected || busy || (details.submitted && !retry)}
+            {!details.accepted && !running && <Button disabled={(!finished && !connected) || busy || (details.submitted && !retry)}
               onClick={() => action("/api/narration/start", payload, () => {
                 setJob({ key: details.key, running: true, completed: details.completed, message: "Connecting to AI Studio" });
                 setRetry(false);
-              })}>{details.completed || details.submitted ? "Resume Narration" : "Start Narration"}</Button>}
-            {finished && !details.accepted && <Button disabled={busy || running}
-              onClick={() => action("/api/narration/accept", payload, value => {
-                setDetails(value);
-                toast.success("Chapter accepted. Story checkpoint saved.");
-              })}>Accept Chapter</Button>}
-            {details.accepted && <span className="text-sm">Chapter accepted · checkpoint saved</span>}
+              })}>{finished ? "Save Narration" : details.completed || details.submitted ? "Resume Narration" : "Start Narration"}</Button>}
+            {details.accepted && <span className="text-sm">Narration saved · checkpoint updated</span>}
           </div>
           {details.script && <div aria-label="Narration script"
             className="max-h-[55vh] overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-white/5 p-4 text-sm leading-relaxed">
