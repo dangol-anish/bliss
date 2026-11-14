@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
+from typing import Literal
 from threading import Event, Lock, Thread
 from time import monotonic
 
@@ -326,7 +327,7 @@ def receive(before, receipt, panel_ids, command):
     stable = 0
     while monotonic() < deadline:
         snapshot = command("snapshot")
-        if snapshot.get("protocol") != 5 or not isinstance(snapshot.get("replies"), list):
+        if snapshot.get("protocol") != 6 or not isinstance(snapshot.get("replies"), list):
             raise RuntimeError("Reload the Bliss Narration extension and reconnect the AI Studio tab.")
         latest = snapshot["replies"][-1] if snapshot["replies"] else {}
         token = (latest.get("id"), latest.get("text"))
@@ -335,11 +336,14 @@ def receive(before, receipt, panel_ids, command):
             stable = stable + 1 if token == previous else 1
             previous = token
             if stable >= 3:
-                return validate_reply(token[1], receipt, panel_ids)
+                try:
+                    return validate_reply(token[1], receipt, panel_ids)
+                except ValueError as exc:
+                    raise studio_bridge.RetryableStudioError(str(exc)) from exc
         else:
             previous, stable = None, 0
         cancel.wait(1)
-    raise RuntimeError("No complete reply arrived within 10 minutes. Check the AI Studio tab.")
+    raise studio_bridge.RetryableStudioError("No complete reply arrived within 10 minutes.")
 
 
 def view(selected):
@@ -353,7 +357,7 @@ def view(selected):
             )}
 
 
-def run_queue(downloads, selected):
+def run_queue(downloads, selected, review=False):
     global active
     replies = selected["replies"][:]
     key = selected["key"]
@@ -377,7 +381,7 @@ def run_queue(downloads, selected):
     try:
         if len(replies) < len(selected["batches"]):
             hello = command("hello")
-            if hello.get("protocol") != 5:
+            if hello.get("protocol") != 6:
                 raise RuntimeError("Reload the Bliss Narration extension and reconnect the AI Studio tab.")
         for index in range(len(replies), len(selected["batches"])):
             current_selection()
@@ -385,22 +389,43 @@ def run_queue(downloads, selected):
             photos = [{"name": section["file"], "data": base64.b64encode(
                 (selected["directory"] / section["file"]).read_bytes()
             ).decode("ascii")} for section in selected["batches"][index]]
-            command("prepare", {"prompt": prompt, "photos": photos, "fresh": True, "schema": selected["schema"]}, 600)
-            before = {(reply["id"], reply["text"]) for reply in command("snapshot").get("replies", [])}
-            current_selection()
-            if cancel.is_set():
-                raise InterruptedError("Narration stopped.")
-            save_draft(key, replies, True)
-            command("send")
-            update(message="Waiting for Gemini")
-            result = receive(before, receipt, ids, command)
+            attempt = 0
+            refresh = selected["submitted"] and index == len(selected["replies"])
+            while True:
+                try:
+                    current_selection()
+                    command("prepare", {"prompt": prompt, "photos": photos, "fresh": True,
+                                        "refresh": refresh, "schema": selected["schema"]}, 600)
+                    before = {(reply["id"], reply["text"]) for reply in command("snapshot").get("replies", [])}
+                    current_selection()
+                    if cancel.is_set():
+                        raise InterruptedError("Narration stopped.")
+                    save_draft(key, replies, True)
+                    command("send")
+                    update(message="Waiting for Gemini")
+                    result = receive(before, receipt, ids, command)
+                    break
+                except studio_bridge.RetryableStudioError as exc:
+                    save_draft(key, replies, False)
+                    attempt += 1
+                    refresh = True
+                    delay = min(60, 2 ** min(attempt, 6))
+                    update(message=f"{exc} Refreshing AI Studio in {delay}s (retry {attempt}).")
+                    if cancel.wait(delay):
+                        raise InterruptedError("Narration stopped.") from exc
             current_selection()
             replies.append(result)
             save_draft(key, replies, False)
             update(completed=len(replies), message="Batch saved")
         if cancel.is_set():
             raise InterruptedError("Narration stopped.")
-        save_checkpoint(current_selection())
+        current = current_selection()
+        if review:
+            if not view(current)["script"]:
+                raise ValueError("This chapter has no spoken narration to review.")
+            update(status="review", message="Ready for review.")
+            return
+        save_checkpoint(current)
         update(status="complete", message="Narration saved. Story checkpoint updated.")
     except InterruptedError:
         update(status="stopped", message="Narration stopped.")
@@ -416,7 +441,7 @@ def run_queue(downloads, selected):
             active["running"] = False
 
 
-def start_queue(downloads, selected, retry):
+def start_queue(downloads, selected, retry, review=False):
     global active
     with state_lock:
         if active and active["running"]:
@@ -430,7 +455,7 @@ def start_queue(downloads, selected, retry):
         cancel.clear()
         active = {"running": True, "status": "running", "message": "Connecting to AI Studio",
                   "key": selected["key"], "completed": len(selected["replies"]), "total": len(selected["batches"])}
-        Thread(target=run_queue, args=(downloads, selected), daemon=True).start()
+        Thread(target=run_queue, args=(downloads, selected, review), daemon=True).start()
 
 
 def play_pause_sound():
@@ -465,6 +490,7 @@ class NarrationSelection(BaseModel):
     revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
     key: str | None = None
     retry: bool = False
+    review: bool = False
 
 
 def install(app, downloads):
@@ -492,10 +518,31 @@ def install(app, downloads):
     def start(body: NarrationSelection, request: Request):
         studio_bridge.local_request(request)
         try:
-            start_queue(downloads, load_checked(body), body.retry)
+            start_queue(downloads, load_checked(body), body.retry, body.review)
             return {"started": True}
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    @router.post("/review/{decision}")
+    def review_chapter(decision: Literal["accept", "reject"], body: NarrationSelection, request: Request):
+        studio_bridge.local_request(request)
+        with state_lock:
+            if not active or active["running"] or active["status"] != "review" or active["key"] != body.key:
+                raise HTTPException(409, "This narration is no longer awaiting review.")
+            try:
+                selected = load_checked(body)
+                if selected["accepted"] or selected["submitted"] or len(selected["replies"]) != len(selected["batches"]):
+                    raise HTTPException(409, "This narration is no longer awaiting review.")
+                if decision == "accept":
+                    save_checkpoint(selected)
+                    active.update(status="complete", message="Narration saved. Story checkpoint updated.")
+                else:
+                    with library() as db:
+                        db.execute("DELETE FROM drafts WHERE id=?", (selected["key"],))
+                    active.update(status="rejected", message="Narration rejected.", completed=0)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        return {"decision": decision}
 
     @router.post("/alert")
     def alert(request: Request):

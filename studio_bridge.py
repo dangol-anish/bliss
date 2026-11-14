@@ -161,6 +161,10 @@ def open_folder(request: Request):
     return {'opened': True}
 
 
+class RetryableStudioError(RuntimeError):
+    """AI Studio explicitly failed, or preparation failed before submission."""
+
+
 def command(action, payload, cancel, *, timeout=35, report=None):
     global pending
     with lock:
@@ -181,7 +185,12 @@ def command(action, payload, cancel, *, timeout=35, report=None):
                 if 'result' in entry:
                     value = entry['result']
                     if value.get('error'):
-                        raise RuntimeError(str(value['error'])[:1800])
+                        retryable = value.get('code') in {'generation', 'tab_lost'} or (
+                            action == 'prepare' and value.get('retry_safe') is True
+                            and value.get('code') not in {'access', 'limit'}
+                        )
+                        error = RetryableStudioError if retryable else RuntimeError
+                        raise error(str(value['error'])[:1800])
                     return value
             if report and activity and activity != reported:
                 report(activity)

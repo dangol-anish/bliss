@@ -78,8 +78,10 @@ export async function runBatchItem(action, item, settings, report, stopped) {
     case "narrate": {
       const details = await batchRequest(`/api/narration/chapter?${query}`);
       if (details.accepted || stopped()) return;
-      if (details.submitted) throw new Error("Check the last AI Studio request in Narration before retrying.");
-      await batchRequest("/api/narration/start", { ...item, key: details.key, revision: details.revision });
+      const selection = { ...item, key: details.key, revision: details.revision };
+      await batchRequest("/api/narration/start", {
+        ...selection, retry: details.submitted, review: settings.reviewChapters,
+      });
       while (true) {
         if (stopped()) {
           await batchRequest("/api/narration/stop", {});
@@ -89,6 +91,12 @@ export async function runBatchItem(action, item, settings, report, stopped) {
         if (job?.key !== details.key) throw new Error("The narration job changed. Check Narration.");
         if (!job.running) {
           if (job.status === "complete") return;
+          if (job.status === "review") {
+            query.set("revision", details.revision);
+            const draft = await batchRequest(`/api/narration/chapter?${query}`);
+            if (draft.key !== details.key || !draft.script) throw new Error("The narration draft changed.");
+            return { review: { selection, script: draft.script } };
+          }
           const error = new Error(job.message || "Narration paused.");
           error.alertPlayed = job.status === "paused";
           throw error;

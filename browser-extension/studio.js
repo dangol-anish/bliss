@@ -1,8 +1,8 @@
 /* Visible DOM controls only. No page internals, network interception, login or keys. */
 (() => {
   'use strict';
-  if(globalThis.__blissNarrationExtension===5)return;
-  globalThis.__blissNarrationExtension=5;
+  if(globalThis.__blissNarrationExtension===6)return;
+  globalThis.__blissNarrationExtension=6;
   const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const visible=e=>!!(e.getClientRects().length)&&getComputedStyle(e).visibility!=='hidden';
   const label=e=>{
@@ -15,12 +15,13 @@
   function one(selector,name){const found=elements(selector,name);if(found.length!==1)fail(`Could not identify ${name} in AI Studio. Check Run settings and the selected tab, then Resume.`);return found[0];}
   let actionDeadline=Infinity;
   async function until(fn,timeout=600000){const end=Math.min(Date.now()+timeout,actionDeadline);while(Date.now()<end){check();const result=fn();if(result)return result;await wait(200);}fail('AI Studio controls did not become ready within the 10-minute preparation window. Nothing was submitted. Check the tab before resuming.');}
-  function check(){
+  function check(modelError = ''){
     // Read provider notices, never quoted story dialogue or the user's prompt.
-    const text=platformText();
+    const text=platformText()+"\n"+modelError;
     if(/captcha|verify (?:that )?you are human|unusual traffic|suspicious activity|access restricted/i.test(text))fail('AI Studio needs a human access check. Complete it yourself before resuming.','access');
     if(/quota.{0,80}(?:exceeded|exhausted)|(?:daily|usage|rate) limit (?:reached|exceeded)|too many requests|you(?: have|.ve) reached.{0,60}limit/i.test(text))fail('AI Studio reports a usage limit. Progress is saved. Wait until access is available, then Resume.','limit');
-    if(/failed to generate|an internal error occurred|something went wrong|content.{0,25}blocked/i.test(text))fail('AI Studio did not finish normally. Inspect its last request; nothing will be resent automatically.','generation',false);
+    if(/content.{0,25}blocked|blocked (?:by|for) safety/i.test(text))fail('AI Studio blocked the response. Inspect the AI Studio tab.','access',false);
+    if(/failed to generate|an internal error occurred|something went wrong|permission denied|service (?:unavailable|overloaded)|temporarily unavailable/i.test(text))fail('AI Studio reported a generation error.','generation',false);
   }
   function fill(element,value){
     element.focus();
@@ -38,6 +39,17 @@
   const run=()=>elements(buttons,/^Run(?:\s|$)/);
   const enabled=e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true';
   function platformText(){return [...document.querySelectorAll('[role="alert"],[role="alertdialog"],mat-snack-bar-container,ms-error-message,.error-message')].filter(visible).map(e=>e.innerText).join('\n').slice(0,5000);}
+  function inlinePermissionDenied(){
+    const message=/^permission denied[.\s]+please check your account permissions and project settings\.?$/i;
+    const nodes=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+    while(nodes.nextNode()){
+      const node=nodes.currentNode;
+      if(!message.test(node.nodeValue.trim()))continue;
+      const element=node.parentElement;
+      if(element&&!element.closest('textarea,input,[contenteditable],pre,code')&&visible(element))return true;
+    }
+    return false;
+  }
   function modelReplies(){
     const roots=[];
     for(const good of elements(buttons,/^Good response$/)){
@@ -79,11 +91,17 @@
   }
   function snapshot(){
     check();
+    if(inlinePermissionDenied())fail('AI Studio reported Permission denied.','generation',false);
     const replies=modelReplies();
     const generating=!!elements(buttons,/^(?:Stop|Cancel)(?:\s|$)/i).length||
       !!elements('[aria-busy="true"],[role="progressbar"],mat-progress-spinner',/.*/).length;
+    const latest=replies.at(-1);
+    if(!generating&&!latest?.completed){
+      const error = latest?.text.match(/^(?:permission denied|failed to generate|an internal error occurred|something went wrong|service (?:unavailable|overloaded)|temporarily unavailable|too many requests|quota exceeded|content blocked)\b[^{}]{0,500}$/i);
+      if(error)check(error[0]);
+    }
     // Completion belongs to the latest model turn, never a stale page-wide notice.
-    return {protocol:5,url:location.href,visible:document.visibilityState==='visible',focused:document.hasFocus(),status_text:platformText(),replies,generating,
+    return {protocol:6,url:location.href,visible:document.visibilityState==='visible',focused:document.hasFocus(),status_text:platformText(),replies,generating,
       finished:!generating&&replies.at(-1)?.completed===true};
   }
   async function readSnapshot(){
@@ -165,7 +183,7 @@
   let busy=false;
   chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     if(sender.id!==chrome.runtime.id||message.type!=='narration-command')return;
-    if(message.action==='ping'){reply({ready:true,documentId,protocol:5});return;}
+    if(message.action==='ping'){reply({ready:true,documentId,protocol:6});return;}
     if(busy){reply({error:'An earlier action is still running in this AI Studio tab. Inspect it before resuming.',code:'recovery'});return;}
     busy=true;
     actionDeadline=message.expiresAt;

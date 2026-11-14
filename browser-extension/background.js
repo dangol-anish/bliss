@@ -9,10 +9,22 @@ async function api(path,body,token){
   if(!response.ok)throw Error(typeof value.detail==='string'?value.detail:'Local browser connection failed. Check the app and pair again.');
   return value;
 }
-async function chosenTab(){
+async function chosenTab(action){
   const {tabId}=await chrome.storage.local.get('tabId');
   if(!Number.isInteger(tabId))throw Error('Open AI Studio in your normal browser, then connect that tab from the extension popup.');
-  const tab=await chrome.tabs.get(tabId);
+  let tab;
+  try{
+    tab=await chrome.tabs.get(tabId);
+  }catch(error){
+    if(!/No tab with id/i.test(error.message))throw error;
+    tab=await chrome.tabs.create({url:'https://aistudio.google.com/prompts/new_chat',active:true});
+    await chrome.storage.local.set({tabId:tab.id,narrationWindowId:null});
+    await ready(tab.id,undefined);
+    tab=await chrome.tabs.get(tab.id);
+    if(!['hello','prepare'].includes(action)){
+      throw Object.assign(Error('The AI Studio tab closed. Reopening the batch.'),{code:'tab_lost'});
+    }
+  }
   if(!tab.url?.startsWith('https://aistudio.google.com/'))throw Error('The selected tab is not ready in AI Studio. Finish signing in yourself, then Resume in the app.');
   return tab;
 }
@@ -39,12 +51,19 @@ async function ready(tabId,previousDocument,expiresAt=Date.now()+25000){
 }
 async function execute(command){
   if(!['hello','prepare','snapshot','send','recover'].includes(command.action))throw Error('Unknown narration action.');
-  let tab=await chosenTab();
+  let tab=await chosenTab(command.action);
   const token=(await chrome.storage.local.get('token')).token;
   const progress=step=>api('/progress',{id:command.id,step},token);
   if(Date.now()>command.expiresAt)throw Error('This browser action expired. Inspect the tab before resuming.');
   if(command.action==='hello'){const value=await ready(tab.id,undefined,command.expiresAt);return {url:tab.url,protocol:value.protocol,window_visibility:true};}
   tab=await renderingWindow(tab);
+  if(command.action==='prepare'&&command.payload.refresh){
+    await progress('opening_tab');
+    let previousDocument;
+    try{previousDocument=(await chrome.tabs.sendMessage(tab.id,{type:'narration-command',action:'ping'}))?.documentId;}catch(_){}
+    await chrome.tabs.reload(tab.id);
+    await ready(tab.id,previousDocument,Math.min(command.expiresAt,Date.now()+30000));
+  }
   if(command.action==='recover'||(command.action==='prepare'&&command.payload.fresh)){
     const url=command.action==='recover'?command.payload.url:'https://aistudio.google.com/prompts/new_chat';
     const parsed=new URL(url);
@@ -88,7 +107,7 @@ async function loop(){
         if(command){
           let value;
           const heartbeat=setInterval(()=>api('/heartbeat',{},token).catch(()=>{}),5000);
-          try{value=await execute(command);}catch(error){value={error:error.message,code:'extension',retry_safe:command.action==='prepare'};}finally{clearInterval(heartbeat);}
+          try{value=await execute(command);}catch(error){value={error:error.message,code:error.code||(/No tab with id/i.test(error.message)?'tab_lost':'extension'),retry_safe:command.action==='prepare'};}finally{clearInterval(heartbeat);}
           // Retrying this acknowledgement is safe; executing the command again is not.
           let saved=false;
           for(let i=0;i<3&&!saved;i++){try{await api('/result',{id:command.id,value},token);saved=true;}catch(_){await delay(500);}}

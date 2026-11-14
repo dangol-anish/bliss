@@ -24,6 +24,8 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
   const [error, setError] = useState("");
   const [results, setResults] = useState([]);
   const [minimum, setMinimum] = useState(1200);
+  const [reviewChapters, setReviewChapters] = useState(false);
+  const [review, setReview] = useState(null);
   const [maximum, setMaximum] = useState(3000);
 
   async function open() {
@@ -103,7 +105,11 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
         const label = itemName(current);
         const report = value => setProgress(`${index + 1}/${queue.length} · ${label} · ${Math.floor(value)}%`);
         report(0);
-        const result = await runBatchItem(action, current, { minimum, maximum }, report, () => stop.current);
+        const result = await runBatchItem(action, current, { minimum, maximum, reviewChapters }, report, () => stop.current);
+        if (result?.review && !stop.current) {
+          setReview({ ...result.review, action, queue, index, label });
+          return;
+        }
         if (result?.watch) setResults(previous => [...previous, { label, ...result }]);
       }
       if (stop.current) toast.info("Batch stopped");
@@ -118,6 +124,29 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
       setBusy(false);
       setStopping(false);
       setProgress("");
+      window.dispatchEvent(new CustomEvent("bliss-batch-complete", { detail: section }));
+    }
+  }
+
+  async function decide(decision) {
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      await batchRequest(`/api/narration/review/${decision}`, review.selection);
+      setReview(null);
+    } catch (failure) {
+      setError(failure.message);
+      return;
+    } finally {
+      running.current = false;
+      setBusy(false);
+    }
+    if (decision === "accept") {
+      advance(review.action, review.queue, review.index + 1);
+    } else {
+      toast.info("Narration rejected. Batch stopped.");
       window.dispatchEvent(new CustomEvent("bliss-batch-complete", { detail: section }));
     }
   }
@@ -140,6 +169,19 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
             <h2 id={`${section}-batch-title`} className="text-sm font-semibold">Batch chapters</h2>
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => close()}>Close</Button>
           </div>
+          {review ? <>
+            <p className="text-sm">{review.label}</p>
+            <div className="max-h-[55dvh] overflow-auto whitespace-pre-wrap rounded-md border border-white/15 p-3 text-sm">
+              {review.script}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" disabled={busy} onClick={() => decide("accept")}>Accept &amp; Continue</Button>
+              <Button type="button" variant="outline" disabled={busy} onClick={() => decide("reject")}>Reject</Button>
+              <Button type="button" variant="ghost" disabled={busy} onClick={() => { setReview(null); setError(""); }}>
+                End Batch
+              </Button>
+            </div>
+          </> : <>
           {rows.map(row => {
             const entry = catalog.find(item => item.name === row.series);
             const chapters = entry?.chapters ?? [];
@@ -170,6 +212,11 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
               <Input id="batch-max" type="number" min={1} max={100000} value={maximum} disabled={busy}
                 onChange={event => setMaximum(Number(event.target.value))} /></div>
           </div>}
+          {section === "narration" && <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={reviewChapters} disabled={busy}
+              onChange={event => setReviewChapters(event.target.checked)} />
+            Review chapters before saving
+          </label>}
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" disabled={busy || !catalog.length} onClick={() => {
               const id = nextId.current++;
@@ -181,6 +228,7 @@ export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false 
               disabled={stopping} onClick={() => { stop.current = true; setStopping(true); }}>
               {stopping ? "Stopping…" : "Stop Batch"}</Button>}
           </div>
+          </>}
           {progress && <p role="status" className="text-sm text-muted-foreground">{progress}</p>}
           {error && <p role="alert" className="text-sm">{error}</p>}
           {results.map(item => <div key={item.watch ?? item.label} className="grid gap-1 text-sm">
