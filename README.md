@@ -1,6 +1,6 @@
 # Bliss
 
-A local macOS workspace for making manhwa recap videos. Downloader saves chapter images from Webtoon and Weeb Central series links.
+A local macOS and Windows workspace for making manhwa recap videos. Downloader saves chapter images from Webtoon and Weeb Central series links.
 
 ## Setup
 
@@ -11,6 +11,8 @@ uv sync --locked
 npm ci
 npm run build
 ```
+
+On Windows, run the setup commands in PowerShell and make sure both `ffmpeg` and `ffprobe` are on PATH. Build the frontend after pulling from GitHub.
 
 ## Local preview
 
@@ -37,7 +39,18 @@ models/
   bounding_box/
 ```
 
-The `animecv` folder includes its bundled EfficientDet code. Use the matching local runtime and weights from the WTN crop experiments. Bliss runs both panel models and D2 on the Mac.
+The `animecv` folder includes its bundled EfficientDet code. Use the matching local runtime and weights from the WTN crop experiments. Both YOLO panel models run on CPU. D2 uses Metal on supported Macs and CUDA on Windows when CUDA-enabled PyTorch detects an NVIDIA GPU. D2 falls back to CPU if acceleration is unavailable or fails.
+
+For NVIDIA acceleration on Windows, run the detector setup first, then install the matching CUDA build into the project environment. For example, for a driver and GPU that support CUDA 12.8:
+
+```powershell
+uv sync --locked --extra detection
+uv pip install --reinstall --no-deps torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"
+uv run --no-sync uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+Use the no-sync launch command after installing the CUDA wheels so the locked setup does not replace them.
 
 After stitching, open **Panels**, choose a series and chapter, and click **Detect Panels**. Click a box, drag it or any handle to adjust it, and use **Delete** or **Undo** as needed. Save Edits keeps the reviewed geometry with the stitched chapter. Panel IDs follow top-to-bottom reading order with left-to-right ordering for boxes at the same height.
 
@@ -45,7 +58,7 @@ After stitching, open **Panels**, choose a series and chapter, and click **Detec
 
 Open **Narration** after saving a split. In Chrome or Brave, load the folder from **Open Extension Folder** as an unpacked extension from the browser's Extensions page. Open Google AI Studio in that browser, sign in, and use **Get Pairing Code** in Bliss to connect the AI Studio tab through the Bliss Narration extension popup.
 
-Select a chapter and choose **Start Narration** to send its saved images to AI Studio in batches. Bliss validates each JSON response and saves the story checkpoint automatically when all batches for the chapter finish. In Batch mode it then starts the next chapter. An error pauses the queue and plays a macOS alert. The story library is stored at `~/Library/Application Support/Bliss/Story/story.sqlite3`, outside the downloaded chapters. Bliss uses the latest saved checkpoint before the selected chapter to build its prompt. A local test installation can set `BLISS_STORY_LIBRARY` to a separate directory.
+Select a chapter and choose **Start Narration** to send its saved images to AI Studio in batches. Bliss validates each JSON response and saves the story checkpoint automatically when all batches for the chapter finish. In Batch mode it then starts the next chapter. An error pauses the queue and plays a system alert. The story library is stored at `~/Library/Application Support/Bliss/Story/story.sqlite3`, outside the downloaded chapters. On Windows it lives under `%LOCALAPPDATA%\Bliss\Story\story.sqlite3`. Bliss uses the latest saved checkpoint before the selected chapter to build its prompt. A local test installation can set `BLISS_STORY_LIBRARY` to a separate directory.
 
 ### Preview
 

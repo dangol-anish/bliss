@@ -9,20 +9,25 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-import subprocess
+import sys
 from threading import Event, Lock, Thread
 from time import monotonic
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
+from desktop import play_alert
 from panel_review import open_strip, read_review
 from renumber import chapter_folder
 from strip_split import OUTPUT_DIR
 import studio_bridge
 
 ROOT = Path(__file__).resolve().parent
-LIBRARY = Path(os.environ.get("BLISS_STORY_LIBRARY", Path.home() / "Library/Application Support/Bliss/Story"))
+if sys.platform == "win32":
+    app_support = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+else:
+    app_support = Path.home() / "Library/Application Support"
+LIBRARY = Path(os.environ.get("BLISS_STORY_LIBRARY", app_support / "Bliss" / "Story"))
 PROMPT = ROOT / "prompts/narration_master.md"
 SCHEMA = ROOT / "browser-extension/narration-schema.json"
 MAX_BATCH_BYTES = 32_000_000
@@ -430,9 +435,8 @@ def start_queue(downloads, selected, retry):
 
 def play_pause_sound():
     try:
-        subprocess.Popen(["/usr/bin/afplay", "/System/Library/Sounds/Sosumi.aiff"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
+        play_alert()
+    except (OSError, RuntimeError):
         logging.warning("Could not play narration pause sound.", exc_info=True)
 
 

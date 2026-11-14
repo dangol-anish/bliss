@@ -155,13 +155,9 @@ async def result(request: Request):
 @router.post('/open-folder')
 def open_folder(request: Request):
     local_request(request)
-    import os
-    import subprocess
-    import sys
+    from desktop import open_folder as show_folder
     path = Path(__file__).resolve().parent / 'browser-extension'
-    if sys.platform == 'darwin': subprocess.run(['open', str(path)], check=True, timeout=10)
-    elif sys.platform == 'win32': os.startfile(str(path))
-    else: raise HTTPException(400, 'Use the browser-extension folder inside this repository.')
+    show_folder(path)
     return {'opened': True}
 
 

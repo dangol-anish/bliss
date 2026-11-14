@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from chapter_backup import move_backup
+from desktop import choose_backup_folder, open_folder
 import narration
 from studio_bridge import local_request
 
@@ -119,7 +120,7 @@ def open_download_folder(request: OpenFolderRequest):
     folder = DOWNLOADS.resolve()
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["/usr/bin/open", str(folder)], check=True, capture_output=True, timeout=5)
+        open_folder(folder)
     except (OSError, subprocess.SubprocessError) as exc:
         raise HTTPException(500, "Could not open the download folder.") from exc
     return Response(status_code=204)
@@ -191,7 +192,7 @@ def stitch_series():
 def open_stitch_folder(request: ChapterSelection):
     try:
         folder = chapter_folder(DOWNLOADS, request.series, request.chapter)
-        subprocess.run(["/usr/bin/open", str(folder)], check=True, capture_output=True, timeout=5)
+        open_folder(folder)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except (OSError, subprocess.SubprocessError) as exc:
@@ -416,7 +417,7 @@ def open_split_folder(request: SplitFolder):
         folder = root / request.revision
         if root.is_symlink() or folder.is_symlink() or not (folder / "manifest.json").is_file():
             raise ValueError("Save the split images first.")
-        subprocess.run(["/usr/bin/open", str(folder)], check=True, capture_output=True, timeout=5)
+        open_folder(folder)
         return Response(status_code=204)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -442,13 +443,7 @@ def backup_batch(body: BackupBatch, request: Request):
 def run_backup(entries, request):
     local_request(request)
     try:
-        choice = subprocess.run(["/usr/bin/osascript", "-e", """
-            try
-                return POSIX path of (choose folder with prompt "Choose where to move the chapter backup")
-            on error number -128
-                return ""
-            end try
-        """], check=True, capture_output=True, text=True).stdout.rstrip("\n")
+        choice = choose_backup_folder()
     except (OSError, subprocess.SubprocessError) as exc:
         raise HTTPException(500, "Could not open the destination picker.") from exc
     if not choice:

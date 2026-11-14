@@ -258,7 +258,11 @@ def join_previews(clips, target):
         work = Path(temporary)
         # Use local aliases so chapter titles never need ffconcat escaping.
         for index, clip in enumerate(clips):
-            (work / f"{index}.mp4").symlink_to(clip.resolve())
+            alias = work / f"{index}.mp4"
+            try:
+                alias.hardlink_to(clip)
+            except OSError:
+                shutil.copyfile(clip, alias)
         (work / "chapters.ffconcat").write_text(
             "ffconcat version 1.0\n" + "".join(f"file {index}.mp4\n" for index in range(len(clips)))
         )
