@@ -10,7 +10,7 @@ function itemName({ series, chapter, end_chapter }) {
   return `${series} · ${chapter}${end_chapter && end_chapter !== chapter ? ` to ${end_chapter}` : ""}`;
 }
 
-export function ChapterBatch({ section }) {
+export function ChapterBatch({ section, buttonLabel = "Batch", disabled = false }) {
   const config = batchSections[section];
   const dialog = useRef(null);
   const stop = useRef(false);
@@ -152,7 +152,7 @@ export function ChapterBatch({ section }) {
 
   return (
     <>
-      <Button type="button" variant="outline" onClick={open}>Batch</Button>
+      <Button type="button" variant="outline" disabled={disabled} onClick={open}>{buttonLabel}</Button>
       <dialog ref={dialog} aria-labelledby={`${section}-batch-title`} onCancel={close}
         className="fixed inset-0 m-auto max-h-[85dvh] w-[calc(100%-2rem)] max-w-2xl overflow-auto rounded-xl border border-white/15 bg-neutral-950 p-4 text-foreground backdrop:bg-black/75">
         <div className="grid gap-3">

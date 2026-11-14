@@ -115,8 +115,7 @@ function DownloaderLayout() {
         </form>
       </main>
       <main hidden={!panelsSelected} aria-label="Panels" className={`${workspaceClass} h-[calc(100dvh-4rem)] sm:h-[calc(100dvh-4.5rem)]`}>
-        <div className="mb-3"><ChapterBatch section="panels" /></div>
-          <Panels active={panelsSelected} />
+        <Panels active={panelsSelected} />
       </main>
       {splitSelected && (
         <main aria-label="Split Strip" className={`${workspaceClass} h-[calc(100dvh-4rem)] sm:h-[calc(100dvh-4.5rem)]`}>

@@ -1,3 +1,4 @@
+import { ChapterBatch } from "./chapter-batch.jsx";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "./ui/button";
 import { Label } from "./ui/label";
@@ -66,6 +67,7 @@ export function Panels({ active }) {
   const [saved, setSaved] = useState(emptyBoxes);
   const [undo, setUndo] = useState([]);
   const [selected, setSelected] = useState(null);
+  const [chapterDrafts, setChapterDrafts] = useState(new Map());
   const [reload, setReload] = useState(0);
   const [pending, setPending] = useState("");
   const [progress, setProgress] = useState(0);
@@ -80,6 +82,8 @@ export function Panels({ active }) {
   const zoom = zoomLevels[zoomIndex];
   const dirty = boxes !== saved;
   const query = new URLSearchParams({ series, chapter });
+  const chapterKey = JSON.stringify([series, chapter]);
+  const hasEdits = dirty || chapterDrafts.size > 0;
   const canEdit = document?.boxes != null;
 
   useEffect(() => {
@@ -102,6 +106,15 @@ export function Panels({ active }) {
 
   useEffect(() => {
     if (!chapter) return;
+    const cached = chapterDrafts.get(chapterKey);
+    if (cached) {
+      openReview(cached.document);
+      nextBoxId.current = cached.nextId;
+      setBoxes(cached.boxes);
+      setSaved(cached.saved);
+      setUndo(cached.undo);
+      return;
+    }
     const controller = new AbortController();
     const params = new URLSearchParams({ series, chapter });
     request(`/api/panels/chapter?${params}`, { signal: controller.signal })
@@ -112,14 +125,14 @@ export function Panels({ active }) {
   }, [series, chapter, reload]);
 
   useEffect(() => {
-    if (!dirty) return;
+    if (!hasEdits) return;
     function confirmClose(event) {
       event.preventDefault();
       event.returnValue = "";
     }
     window.addEventListener("beforeunload", confirmClose);
     return () => window.removeEventListener("beforeunload", confirmClose);
-  }, [dirty]);
+  }, [hasEdits]);
 
   useLayoutEffect(() => {
     const anchor = zoomAnchor.current;
@@ -159,7 +172,14 @@ export function Panels({ active }) {
   }
 
   function selectChapter(nextSeries, nextChapter) {
-    if (dirty && !window.confirm("Discard unsaved panel edits?")) return;
+    if (series === nextSeries && chapter === nextChapter) return;
+    const nextId = nextBoxId.current;
+    setChapterDrafts(current => {
+      const drafts = new Map(current);
+      if (dirty) drafts.set(chapterKey, { document, boxes, saved, undo, nextId });
+      else drafts.delete(chapterKey);
+      return drafts;
+    });
     openReview(null);
     setSeries(nextSeries);
     setChapter(nextChapter);
@@ -196,16 +216,34 @@ export function Panels({ active }) {
     }
   }
 
-  async function save() {
-    const snapshot = boxes;
+  async function save(all = false) {
+    const edits = all ? new Map(chapterDrafts) : new Map();
+    if (dirty) edits.set(chapterKey, { document, boxes });
+    else edits.delete(chapterKey);
     setPending("save");
+    let count = 0;
+    const failures = [];
     try {
-      const payload = { series, chapter, source: document.source, boxes: snapshot.map(row => row.box) };
-      await send("/api/panels/chapter", payload, "PUT");
-      setSaved(snapshot);
-      toast.success("Panel edits saved");
-    } catch (error) {
-      toast.error(error.message);
+      for (const [key, edit] of edits) {
+        const [editSeries, editChapter] = JSON.parse(key);
+        try {
+          await send("/api/panels/chapter", {
+            series: editSeries, chapter: editChapter,
+            source: edit.document.source, boxes: edit.boxes.map(row => row.box),
+          }, "PUT");
+          if (key === chapterKey) setSaved(edit.boxes);
+          setChapterDrafts(current => {
+            const remaining = new Map(current);
+            remaining.delete(key);
+            return remaining;
+          });
+          count++;
+        } catch (error) {
+          failures.push(`${editSeries} · ${editChapter}: ${error.message}`);
+        }
+      }
+      if (count) toast.success(all ? `Saved panel edits for ${count} chapter${count === 1 ? "" : "s"}` : "Panel edits saved");
+      if (failures.length) toast.error("Some panel edits could not be saved", { description: failures.join(" · ") });
     } finally {
       setPending("");
     }
@@ -375,6 +413,10 @@ export function Panels({ active }) {
             {chapters.map(name => <option key={name}>{name}</option>)}
           </NativeSelect>
         </div>
+        <ChapterBatch section="panels" buttonLabel="Batch Detect" disabled={!!pending} />
+        <Button type="button" variant="outline" disabled={!hasEdits || !!pending} onClick={() => save(true)}>
+          Save All
+        </Button>
         {document && !canEdit && <Button aria-live="polite" disabled={!!pending || tileError} onClick={detect}>
           {pending === "detect" ? `Detecting… ${progress}%` : "Detect Panels"}
         </Button>}

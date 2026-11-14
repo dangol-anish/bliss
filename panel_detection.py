@@ -1,5 +1,7 @@
 """Run the two WTN panel models and the D2 head detector in strip coordinates."""
+from copy import deepcopy
 from functools import lru_cache
+import logging
 import re
 import sys
 
@@ -175,6 +177,31 @@ def split_windows(strip):
             yield max(0, start - (200 if start != a else 4)), min(strip.height, b + 4, start + 6200)
 
 
+def enable_mps_head(head, torch):
+    if not torch.backends.mps.is_available():
+        return
+    cpu_model = head.model
+    try:
+        gpu_model = deepcopy(cpu_model).to("mps")
+    except (RuntimeError, NotImplementedError):
+        logging.getLogger(__name__).warning("D2 GPU initialization failed. Using CPU.", exc_info=True)
+        return
+
+    def forward(inputs):
+        nonlocal gpu_model
+        try:
+            # Keep the existing CPU box decoding and suppression.
+            _, regression, classification, anchors = gpu_model(inputs.to("mps"))
+            return None, regression.cpu(), classification.cpu(), anchors.cpu()
+        except (RuntimeError, NotImplementedError):
+            logging.getLogger(__name__).warning("D2 GPU inference failed. Switching to CPU.", exc_info=True)
+            head.model = cpu_model
+            gpu_model = None
+        return cpu_model(inputs)
+
+    head.model = forward
+
+
 @lru_cache(maxsize=1)
 def load_models(folder):
     weights = [folder / f"{style} Style.pt" for style in ("Manhwa", "Manhua")]
@@ -195,6 +222,7 @@ def load_models(folder):
     torch.set_num_threads(4)
     head = FaceDetector_EfficientDet(2, use_cuda=False, base_dir=str(folder))
     head.batch_size = 4
+    enable_mps_head(head, torch)
     return [YOLO(path) for path in weights], head, RapidOCR(intra_op_num_threads=2, inter_op_num_threads=1)
 
 
