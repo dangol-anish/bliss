@@ -10,6 +10,7 @@ import { Narration } from "./narration.jsx";
 import { RecapPreview } from "./recap-preview.jsx";
 import { Panels } from "./panels.jsx";
 import { SplitStrip } from "./split-strip.jsx";
+import { Shorts } from "./shorts.jsx";
 import { Stitch } from "./stitch.jsx";
 
 const workspaceClass = "min-w-0 flex-1 px-1 py-4 sm:px-5 sm:py-6";
@@ -21,7 +22,7 @@ function subscribeToStep(callback) {
 
 function currentStep() {
   const hash = window.location.hash;
-  return ["#stitch", "#panels", "#split-strip", "#narration", "#preview", "#backup"].includes(hash) ? hash : "#downloader";
+  return ["#stitch", "#panels", "#split-strip", "#narration", "#preview", "#shorts", "#backup"].includes(hash) ? hash : "#downloader";
 }
 
 function DownloadRows() {
@@ -70,6 +71,7 @@ function DownloaderLayout() {
   const panelsSelected = step === "#panels";
   const previewSelected = step === "#preview";
   const narrationSelected = step === "#narration";
+  const shortsSelected = step === "#shorts";
   const backupSelected = step === "#backup";
   const splitSelected = step === "#split-strip";
 
@@ -95,6 +97,9 @@ function DownloaderLayout() {
           </Button>
           <Button asChild variant={previewSelected ? "secondary" : "ghost"} className="w-full justify-start">
             <a href="#preview" aria-current={previewSelected ? "page" : undefined}>Preview</a>
+          </Button>
+          <Button asChild variant={shortsSelected ? "secondary" : "ghost"} className="w-full justify-start">
+            <a href="#shorts" aria-current={shortsSelected ? "page" : undefined}>Shorts</a>
           </Button>
           <Button asChild variant={backupSelected ? "secondary" : "ghost"} className="w-full justify-start">
             <a href="#backup" aria-current={backupSelected ? "page" : undefined}>Backup</a>
@@ -135,6 +140,7 @@ function DownloaderLayout() {
           <RecapPreview />
         </main>
       )}
+      {shortsSelected && <main aria-label="Shorts" className={workspaceClass}><Shorts /></main>}
       {backupSelected && (
         <main aria-label="Backup" className={workspaceClass}>
           <div className="mb-3"><ChapterBatch section="backup" /></div>

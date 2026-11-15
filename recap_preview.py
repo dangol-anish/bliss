@@ -5,11 +5,11 @@ import logging
 import re
 import shutil
 import subprocess
+from contextlib import ExitStack
 from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
-from urllib.request import urlopen
 from uuid import UUID
 
 from fastapi import HTTPException, Request
@@ -27,10 +27,9 @@ SPEED = 1.2
 FPS = 30
 SIZE = (1280, 720)
 BELL = Path(__file__).resolve().parent / "data" / "episode-one-bell.mp3"
-BELL_URL = "https://cdn.pixabay.com/audio/2025/05/06/audio_2fd68b9a9a.mp3"
 MOVES = ("left", "right", "in", "up", "out", "down", "right", "up", "left", "out", "down", "in")
 SLIDES = {"left": (-110, 0), "right": (110, 0), "up": (0, -65), "down": (0, 65)}
-RENDER_VERSION = 6
+RENDER_VERSION = 10
 
 
 class PreviewRequest(BaseModel):
@@ -109,20 +108,20 @@ def audio_track(folder, script):
     return cache / "voice.wav", json.loads((cache / "words.json").read_text())
 
 
-def panel_layers(crop):
-    width, height = SIZE
+def panel_layers(crop, size=SIZE):
+    width, height = size
     # Stretch a small copy across the frame and soften detail before enlarging.
     background = crop.resize((320, 180), Image.Resampling.LANCZOS)
-    background = background.filter(ImageFilter.GaussianBlur(12)).resize(SIZE, Image.Resampling.BICUBIC)
-    canvas = Image.blend(background, Image.new("RGB", SIZE, "#f6f4f1"), 0.34)
+    background = background.filter(ImageFilter.GaussianBlur(12)).resize(size, Image.Resampling.BICUBIC)
+    canvas = Image.blend(background, Image.new("RGB", size, "#f6f4f1"), 0.34)
     foreground = ImageOps.contain(crop, (width - 112, height), Image.Resampling.LANCZOS)
     left = (width - foreground.width) // 2
     top = (height - foreground.height) // 2
-    shadow = Image.new("L", SIZE)
+    shadow = Image.new("L", size)
     ImageDraw.Draw(shadow).rectangle(
         (left, top + 10, left + foreground.width - 1, top + foreground.height + 9), fill=158
     )
-    layer = Image.new("RGBA", SIZE, "#17131a")
+    layer = Image.new("RGBA", size, "#17131a")
     layer.putalpha(shadow.filter(ImageFilter.GaussianBlur(16)))
     layer.paste(foreground, (left, top))
     return canvas, layer
@@ -143,27 +142,51 @@ def watermark_overlay():
 
 
 def panel_frame(background, layer, move, phase):
-    width, height = SIZE
-    eased = phase * phase * (3 - 2 * phase)
+    width, height = background.size
     dx, dy = SLIDES.get(move, (0, 0))
-    scale = {"in": 1 + 0.045 * eased, "out": 1.05 - 0.05 * eased}.get(move, 1)
+    scale = {"in": 1 + 0.045 * phase, "out": 1.05 - 0.05 * phase, "tall": 1 + 0.24 * phase}.get(move, 1)
     inverse = 1 / scale
     shifted = layer.transform(
-        SIZE, Image.Transform.AFFINE,
-        (inverse, 0, width * (1 - inverse) / 2 - dx * (1 - eased) * inverse,
-         0, inverse, height * (1 - inverse) / 2 - dy * (1 - eased) * inverse),
+        background.size, Image.Transform.AFFINE,
+        (inverse, 0, width * (1 - inverse) / 2 - dx * (1 - phase) * inverse,
+         0, inverse, height * (1 - inverse) / 2 - dy * (1 - phase) * inverse),
         Image.Resampling.BICUBIC,
     )
     canvas = background.copy()
     canvas.paste(shifted, (0, 0), shifted)
-    watermark = watermark_overlay()
-    canvas.paste(watermark, (width - watermark.width - 22, height - watermark.height - 18), watermark)
+    apply_watermark(canvas)
     return canvas
 
 
-def render(folder, source, beats, target, report, *, opening_bell=False):
+def contained_pan(crop, backdrop, aperture, move, phase):
+    left, top, width, height = aperture
+    dx, dy = SLIDES[move]
+    # A small overscan gives the pan room to move while the panel edges stay put.
+    scale = 1.08 * max(width / crop.width, height / crop.height)
+    spare_x = (crop.width - width / scale) / 2
+    spare_y = (crop.height - height / scale) / 2
+    source_x = spare_x - (spare_x if dx > 0 else -spare_x) * (1 - phase) if dx else spare_x
+    source_y = spare_y - (spare_y if dy > 0 else -spare_y) * (1 - phase) if dy else spare_y
+    with crop.transform((width, height), Image.Transform.AFFINE,
+                        (1 / scale, 0, source_x, 0, 1 / scale, source_y),
+                        Image.Resampling.BILINEAR) as foreground:
+        frame = backdrop.copy()
+        frame.paste(foreground, (left, top))
+    apply_watermark(frame)
+    return frame
+
+
+def apply_watermark(canvas):
+    width, height = canvas.size
+    watermark = watermark_overlay()
+    canvas.paste(watermark, (width - watermark.width - 22, height - watermark.height - 18), watermark)
+
+
+def render(folder, source, beats, target, report, *, opening_bell=False, size=SIZE, panel_image=None, continuous_motion=True):
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise ValueError("Install FFmpeg to generate a preview.")
+    if opening_bell and not BELL.is_file():
+        raise ValueError("Copy episode-one-bell.mp3 into the Bliss data folder to render Episode 1.")
     script, cues = spoken_track(beats)
     report(5)
     audio, words = audio_track(target.parent, script)
@@ -177,60 +200,84 @@ def render(folder, source, beats, target, report, *, opening_bell=False):
     report(45)
     with TemporaryDirectory(dir=target.parent) as temporary:
         work = Path(temporary)
-        manifest = ["ffconcat version 1.0"]
-        with open_strip(folder, source, exact=True) as (strip, current):
-            boxes = read_review(folder, current)
-            if boxes is None:
-                raise ValueError("Save the chapter panels first.")
-            for index, (panel, frame) in enumerate(frames):
-                left, top, right, bottom = boxes[int(panel[1:]) - 1]
-                end = frames[index + 1][1] / FPS if index + 1 < len(frames) else duration
-                count = max(1, round(end * FPS) - frame)
-                travel = min(count - 1, 6 if index == 0 else 8)
-                move = "in" if index == 0 else MOVES[(index - 1) % len(MOVES)]
-                with strip.image(top, bottom, left, right) as crop:
-                    background, layer = panel_layers(crop)
-                for step in range(travel + 1):
-                    filename = f"{index}-{step}.jpg"
-                    with panel_frame(background, layer, move, step / travel if travel else 1) as canvas:
-                        canvas.save(work / filename, quality=93)
-                    seconds = 1 / FPS if step < travel else end - (frame + step) / FPS
-                    manifest.extend([f"file {filename}", f"option framerate {FPS}",
-                                     f"duration {seconds:.9f}"])
-                report(45 + 25 * (index + 1) // len(frames))
-        manifest.extend([f"file {filename}", f"option framerate {FPS}"])
-        (work / "panels.ffconcat").write_text("\n".join(manifest) + "\n")
         sound_options = ["-map", "0:v", "-map", "1:a"]
         if opening_bell:
-            bell = BELL
-            if not bell.is_file():
-                bell = work / "episode-one-bell.mp3"
-                with urlopen(BELL_URL, timeout=15) as response:
-                    bell.write_bytes(response.read(1_000_000))
             sound_options = [
-                "-i", str(bell), "-filter_complex",
+                "-i", str(BELL), "-filter_complex",
                 "[2:a]volume=0.65[bell];[1:a][bell]amix=inputs=2:duration=first:normalize=0,"
                 "alimiter=limit=0.95:level=false:latency=true[a]",
                 "-map", "0:v", "-map", "[a]",
             ]
         with (work / "ffmpeg.log").open("w+") as errors:
             with subprocess.Popen([
-                "ffmpeg", "-v", "error", "-nostdin", "-progress", "pipe:1",
-                "-f", "concat", "-safe", "0", "-i", "panels.ffconcat", "-i", str(audio),
+                "ffmpeg", "-v", "error", "-nostdin",
+                "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{size[0]}x{size[1]}",
+                "-framerate", str(FPS), "-i", "pipe:0", "-i", str(audio),
                 *sound_options,
-                "-vf", f"fps={FPS},tpad=stop_mode=clone:stop=-1",
                 "-t", str(duration), "-c:v", "libx264", "-preset", "veryfast",
                 "-crf", "20", "-g", str(FPS * 2), "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-movflags", "+faststart", "preview.mp4",
-            ], cwd=work, stdout=subprocess.PIPE, stderr=errors, text=True) as encoder:
-                for line in encoder.stdout:
-                    if line.startswith("out_time_us="):
-                        value = line.strip().partition("=")[2]
-                        if value.isdigit():
-                            report(min(99, 70 + int(29 * int(value) / (duration * 1_000_000))))
+            ], cwd=work, stdin=subprocess.PIPE, stderr=errors) as encoder, ExitStack() as stack:
+                if panel_image is None:
+                    strip, current = stack.enter_context(open_strip(folder, source, exact=True))
+                    boxes = read_review(folder, current)
+                    if boxes is None:
+                        raise ValueError("Save the chapter panels first.")
+
+                    def panel_image(panel):
+                        left, top, right, bottom = boxes[int(panel[1:]) - 1]
+                        return strip.image(top, bottom, left, right)
+
+                total_frames = max(frames[-1][1] + 1, round(duration * FPS))
+                try:
+                    for index, (panel, frame) in enumerate(frames):
+                        next_frame = frames[index + 1][1] if index + 1 < len(frames) else total_frames
+                        count = next_frame - frame
+                        move = "in" if index == 0 else MOVES[(index - 1) % len(MOVES)]
+                        with ExitStack() as images:
+                            crop = images.enter_context(panel_image(panel))
+                            tall = crop.height >= 1.5 * crop.width
+                            if continuous_motion and tall:
+                                if move in ("in", "out"):
+                                    move = "tall"
+                                elif move == "left":
+                                    move = "up"
+                                elif move == "right":
+                                    move = "down"
+                            background, layer = panel_layers(crop, size)
+                            images.enter_context(background)
+                            images.enter_context(layer)
+                            use_pan = continuous_motion and move in SLIDES
+                            if use_pan:
+                                with ImageOps.contain(crop, (size[0] - 112, size[1])) as foreground:
+                                    width, height = foreground.size
+                                aperture = ((size[0] - width) // 2, (size[1] - height) // 2, width, height)
+                                # Preserve the static shadow underneath the fixed panel window.
+                                background.paste(layer, (0, 0), layer)
+                            travel = count - 1 if continuous_motion else min(count - 1, 6 if index == 0 else 8)
+                            for step in range(count):
+                                if step <= travel:
+                                    phase = step / travel if travel else 1
+                                    if not continuous_motion:
+                                        phase = phase * phase * (3 - 2 * phase)
+                                    if use_pan:
+                                        canvas = contained_pan(crop, background, aperture, move, phase)
+                                    else:
+                                        canvas = panel_frame(background, layer, move, phase)
+                                    with canvas:
+                                        pixels = canvas.tobytes()
+                                encoder.stdin.write(pixels)
+                                if step % FPS == 0:
+                                    report(45 + 54 * (frame + step) // total_frames)
+                    encoder.stdin.close()
+                except BrokenPipeError:
+                    pass
+                except BaseException:
+                    encoder.kill()
+                    raise
                 if encoder.wait():
                     errors.seek(0)
-                    raise RuntimeError(errors.read())
+                    raise RuntimeError(errors.read() or "FFmpeg could not encode the preview.")
         (work / "preview.mp4").replace(target)
     report(100)
     return [(panel, frame / FPS) for panel, frame in frames]

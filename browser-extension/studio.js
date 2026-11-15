@@ -39,8 +39,8 @@
   const run=()=>elements(buttons,/^Run(?:\s|$)/);
   const enabled=e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true';
   function platformText(){return [...document.querySelectorAll('[role="alert"],[role="alertdialog"],mat-snack-bar-container,ms-error-message,.error-message')].filter(visible).map(e=>e.innerText).join('\n').slice(0,5000);}
-  function inlinePermissionDenied(){
-    const message=/^permission denied[.\s]+please check your account permissions and project settings\.?$/i;
+  function inlineGenerationError(){
+    const message=/^(?:permission denied[.\s]+please check your account permissions and project settings|an internal error has occurred|an internal error occurred|something went wrong)\.?$/i;
     const nodes=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
     while(nodes.nextNode()){
       const node=nodes.currentNode;
@@ -91,7 +91,7 @@
   }
   function snapshot(){
     check();
-    if(inlinePermissionDenied())fail('AI Studio reported Permission denied.','generation',false);
+    if(inlineGenerationError())fail('AI Studio reported an inline generation error.','generation',false);
     const replies=modelReplies();
     const generating=!!elements(buttons,/^(?:Stop|Cancel)(?:\s|$)/i).length||
       !!elements('[aria-busy="true"],[role="progressbar"],mat-progress-spinner',/.*/).length;

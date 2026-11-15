@@ -36,6 +36,7 @@ router = APIRouter(prefix="/api/narration")
 state_lock = Lock()
 cancel = Event()
 active = None
+shorts_running = False
 ACTIVITY = {
     "opening_tab": "Opening AI Studio", "configuring": "Configuring AI Studio",
     "checking_schema": "Verifying Structured outputs", "inserting_prompt": "Adding the prompt",
@@ -444,8 +445,8 @@ def run_queue(downloads, selected, review=False):
 def start_queue(downloads, selected, retry, review=False):
     global active
     with state_lock:
-        if active and active["running"]:
-            raise HTTPException(409, "A narration queue is already running.")
+        if shorts_running or (active and active["running"]):
+            raise HTTPException(409, "An AI Studio job is already running.")
         if selected["accepted"]:
             raise ValueError("This chapter's narration is already complete.")
         if selected["submitted"] and not retry:

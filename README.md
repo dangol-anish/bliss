@@ -64,4 +64,8 @@ Select a chapter and choose **Start Narration** to send its saved images to AI S
 
 Install FFmpeg (including ffprobe), then open **Preview** and select a chapter with a saved narration checkpoint. **Generate Preview** uses Edge TTS online for Steffan at 1.2× and saves the voiceover and word timings locally for reuse. Play the resulting MP4 in Bliss or choose **Download** to save a copy.
 
-Episode 1 opens with [Bell Notification by ALEXIS_GAMING_CAM](https://pixabay.com/sound-effects/film-special-effects-bell-notification-337658/), under the Pixabay Content License.
+Episode 1 opens with [Bell Notification by ALEXIS_GAMING_CAM](https://pixabay.com/sound-effects/film-special-effects-bell-notification-337658/), under the Pixabay Content License. Save it locally as `data/episode-one-bell.mp3`. When moving Bliss to another computer, copy this file into that checkout's `data` folder.
+
+## Shorts
+
+Once narration is saved, open **Shorts**, choose a series and chapter range, and click **Generate Short**. Connect the Bliss Narration extension to AI Studio first. Gemini picks one story from the saved narration and writes it against the selected panel crops. Bliss validates the cut cues and renders a 9:16 preview with Steffan at 1.2×. Review the script and cues in Bliss, then use **Download** to save the MP4.
