@@ -29,64 +29,96 @@ folderButton.addEventListener("click", async () => {
   }
 });
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
+let currentDownload = null;
 
+function setBusy(busy) {
+  button.disabled = busy;
+  rows.disabled = busy;
+}
+
+async function activeDownload() {
+  const response = await fetch("/api/download/active", { cache: "no-store" });
+  if (!response.ok) throw new Error("Could not check download progress.");
+  return response.json();
+}
+
+function followDownload(id, { submitting = false, snapshot = null } = {}) {
+  const job = { id, submitting, cancelling: false, timer: null };
+  currentDownload = job;
+  setBusy(true);
+
+  function showProgress(active) {
+    status.textContent = job.cancelling || active.cancelling ? "Cancelling…" : `${active.percent}%`;
+    cancelButton.disabled = job.cancelling || active.cancelling || active.percent >= 100;
+  }
+
+  async function poll() {
+    try {
+      const active = await activeDownload();
+      if (currentDownload !== job) return;
+      if (active?.id === id) {
+        showProgress(active);
+      } else if (!job.submitting) {
+        finishDownload(job);
+      }
+    } catch {
+      // Keep following the download if the next request succeeds.
+    } finally {
+      if (currentDownload === job) job.timer = setTimeout(poll, 750);
+    }
+  }
+
+  if (snapshot) showProgress(snapshot);
+  else status.textContent = "0%";
+  job.timer = setTimeout(poll, 750);
+  return job;
+}
+
+function finishDownload(job) {
+  if (currentDownload !== job) return;
+  currentDownload = null;
+  clearTimeout(job.timer);
+  status.textContent = "";
+  cancelButton.disabled = true;
+  setBusy(false);
+}
+
+cancelButton.addEventListener("click", async () => {
+  const job = currentDownload;
+  if (!job || job.cancelling) return;
+  job.cancelling = true;
+  cancelButton.disabled = true;
+  status.textContent = "Cancelling…";
+  try {
+    const response = await fetch(`/api/download/cancel/${job.id}`, { method: "POST" });
+    if (!response.ok && response.status !== 409) throw new Error("Could not cancel the download.");
+  } catch (error) {
+    toast.error(error.message);
+  } finally {
+    job.cancelling = false;
+  }
+});
+
+setBusy(true);
+activeDownload().then(active => {
+  if (active) followDownload(active.id, { snapshot: active });
+}).catch(() => {
+  // Allow starting a download even if this initial request fails.
+}).finally(() => {
+  if (!currentDownload) setBusy(false);
+});
+
+form.addEventListener("submit", async event => {
+  event.preventDefault();
   if (button.disabled) return;
+
   const entries = Array.from(rows.querySelectorAll("[data-download-row]"), row => ({
     url: row.querySelector('[name="url"]').value.trim(),
     start: row.querySelector('[name="start"]').valueAsNumber || null,
     end: row.querySelector('[name="end"]').valueAsNumber || null,
   }));
   const progressId = crypto.randomUUID();
-  const progress = new AbortController();
-  let timer;
-  let cancelling = false;
-  button.disabled = true;
-  rows.disabled = true;
-  status.textContent = "0%";
-
-  async function updateProgress() {
-    try {
-      const response = await fetch(`/api/download/progress/${progressId}`, {
-        signal: progress.signal,
-      });
-      if (response.ok) {
-        const { percent } = await response.json();
-        if (!progress.signal.aborted && !cancelling && Number.isInteger(percent)) {
-          cancelButton.disabled = percent >= 100;
-          status.textContent = `${percent}%`;
-        }
-      }
-    } catch {
-      // The download request itself reports any failure.
-    } finally {
-      if (!progress.signal.aborted) {
-        timer = setTimeout(updateProgress, 750);
-      }
-    }
-  }
-
-  async function cancelDownload() {
-    cancelling = true;
-    cancelButton.disabled = true;
-    status.textContent = "Cancelling…";
-    try {
-      const response = await fetch(`/api/download/cancel/${progressId}`, { method: "POST" });
-      if (!response.ok) {
-        throw new Error("Could not cancel the download.");
-      }
-    } catch (error) {
-      if (!progress.signal.aborted) {
-        cancelling = false;
-        cancelButton.disabled = false;
-        toast.error(error.message);
-      }
-    }
-  }
-
-  cancelButton.addEventListener("click", cancelDownload);
-  timer = setTimeout(updateProgress, 750);
+  const job = followDownload(progressId, { submitting: true });
 
   try {
     const response = await fetch("/api/download/batch", {
@@ -94,6 +126,14 @@ form.addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ entries, progress_id: progressId }),
     });
+    if (response.status === 409) {
+      const active = await activeDownload();
+      if (active) {
+        finishDownload(job);
+        followDownload(active.id, { snapshot: active });
+        return;
+      }
+    }
     const result = await response.json();
     if (!response.ok) {
       throw new Error(typeof result.detail === "string" ? result.detail : "Check the link and chapter range.");
@@ -107,12 +147,6 @@ form.addEventListener("submit", async (event) => {
   } catch (error) {
     toast.error("Download failed", { description: error.message });
   } finally {
-    status.textContent = "";
-    progress.abort();
-    clearTimeout(timer);
-    cancelButton.removeEventListener("click", cancelDownload);
-    cancelButton.disabled = true;
-    rows.disabled = false;
-    button.disabled = false;
+    finishDownload(job);
   }
 });

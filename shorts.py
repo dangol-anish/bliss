@@ -307,8 +307,7 @@ def install(app, downloads, lock):
                 raise HTTPException(409, "Wait for the current AI Studio job to finish.")
             if not studio_bridge.connection_view()["connected"]:
                 raise HTTPException(409, "Connect AI Studio from Narration first.")
-            if not lock.acquire(blocking=False):
-                raise HTTPException(409, "Wait for the current chapter operation to finish.")
+            lock.acquire("creating a Short")
             narration.shorts_running = True
             stop.clear()
             job.clear()
@@ -322,11 +321,16 @@ def install(app, downloads, lock):
         stop.set()
         return {"stopping": True}
 
+    def activity():
+        with guard:
+            return dict(job)
+
+    app.state.shorts_activity = activity
+
     @app.get("/api/shorts/job")
     def get_job(request: Request):
         studio_bridge.local_request(request)
-        with guard:
-            return dict(job)
+        return activity()
 
     @app.get("/api/shorts/result")
     def result(request: Request, series: str, chapter: str, end_chapter: str | None = None):

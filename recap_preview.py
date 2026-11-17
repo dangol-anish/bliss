@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import workflow_activity
+from chapter_operations import ChapterOperations
 import re
 import shutil
 import subprocess
@@ -9,7 +11,6 @@ from contextlib import ExitStack
 from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Lock
 from uuid import UUID
 
 from fastapi import HTTPException, Request
@@ -57,6 +58,26 @@ def spoken_track(beats):
     return "\n\n".join(lines), cues
 
 
+class NoSpeechAudio(RuntimeError):
+    pass
+
+
+async def capture_with_retry(script, target):
+    from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
+    from edge_tts.exceptions import NoAudioReceived
+
+    for attempt in range(3):
+        try:
+            return await asyncio.wait_for(capture(script, target), timeout=180)
+        except ClientResponseError as error:
+            if error.status not in {408, 500, 502, 503, 504} or attempt == 2:
+                raise
+        except (TimeoutError, ClientConnectionError, ClientPayloadError, NoAudioReceived, NoSpeechAudio):
+            if attempt == 2:
+                raise
+        await asyncio.sleep(2 ** attempt)
+
+
 async def capture(script, target):
     from edge_tts import Communicate
 
@@ -69,7 +90,7 @@ async def capture(script, target):
             elif event["type"] == "WordBoundary":
                 words.append([event["text"], event["offset"] / 10_000_000])
     if not words or not target.stat().st_size:
-        raise ValueError("Speech generation returned no audio or timing data.")
+        raise NoSpeechAudio("Speech generation returned no audio or timing data.")
     return words
 
 
@@ -99,7 +120,7 @@ def audio_track(folder, script):
         with TemporaryDirectory(dir=cache.parent) as temporary:
             work = Path(temporary)
             raw = work / "raw.mp3"
-            words = asyncio.run(asyncio.wait_for(capture(script, raw), timeout=180))
+            words = asyncio.run(capture_with_retry(script, raw))
             subprocess.run(["ffmpeg", "-v", "error", "-i", str(raw), "-af", f"atempo={SPEED}",
                             str(work / "voice.wav")], check=True, timeout=60)
             raw.unlink()
@@ -322,7 +343,7 @@ def join_previews(clips, target):
 
 def install(app, downloads, *, lock=None):
     if lock is None:
-        lock = Lock()
+        lock = ChapterOperations()
     progress = None
     percent = 0
 
@@ -367,11 +388,11 @@ def install(app, downloads, *, lock=None):
         return {"percent": percent if progress == progress_id else None}
 
     @app.post("/api/preview/generate")
+    @workflow_activity.track("preview", "Rendering preview")
     def generate(body: PreviewRequest, request: Request):
         nonlocal progress, percent
         local_request(request)
-        if not lock.acquire(blocking=False):
-            raise HTTPException(409, "Wait for the current chapter operation to finish.")
+        lock.acquire("rendering a preview")
         try:
             clips, key, target = prepare(body.series, body.chapter, body.end_chapter)
             if key != body.key:
@@ -382,6 +403,7 @@ def install(app, downloads, *, lock=None):
             def report(value):
                 nonlocal percent
                 percent = max(percent, value)
+                workflow_activity.report(body.progress_id, percent)
 
             if not target.is_file():
                 limit = 95 if len(clips) > 1 else 100

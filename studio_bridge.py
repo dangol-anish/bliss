@@ -106,6 +106,21 @@ def pair(body: Pair, request: Request):
         return {'token': connection['token']}
 
 
+@router.post('/disconnect')
+def disconnect(request: Request):
+    global connection, pair_code
+    local_request(request)
+    import narration
+    with narration.state_lock:
+        if narration.active and narration.active['running']:
+            raise HTTPException(409, 'Stop the narration queue before switching its AI Studio account.')
+        with lock:
+            if pending and pending.get('claimed') and 'result' not in pending:
+                raise HTTPException(409, 'Wait for the current browser action to finish before disconnecting.')
+            connection = pair_code = None
+    return {'disconnected': True}
+
+
 @router.post('/poll')
 def poll(request: Request):
     authenticate(request)

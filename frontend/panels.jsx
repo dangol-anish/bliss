@@ -6,7 +6,7 @@ import { NativeSelect } from "./ui/native-select";
 import { toast } from "./notifications";
 
 const emptyBoxes = [];
-const zoomLevels = [40, 55, 70, 85, 100, 125];
+const zoomLevels = [0, 10, 20, 30, 40, 55, 70, 85, 100, 125];
 const selectClass = "h-9 min-w-0 rounded-md border border-input bg-background pl-3 text-sm";
 const handles = [
   ["nw", "-left-1.5 -top-1.5 cursor-nwse-resize"],
@@ -71,7 +71,7 @@ export function Panels({ active }) {
   const [reload, setReload] = useState(0);
   const [pending, setPending] = useState("");
   const [progress, setProgress] = useState(0);
-  const [zoomIndex, setZoomIndex] = useState(0);
+  const [zoomIndex, setZoomIndex] = useState(2);
   const [draft, setDraft] = useState(null);
   const [tileError, setTileError] = useState(false);
   const drag = useRef(null);
@@ -79,6 +79,8 @@ export function Panels({ active }) {
   const canvas = useRef(null);
   const viewport = useRef(null);
   const zoomAnchor = useRef(null);
+  const localEdits = useRef(false);
+  const refreshPending = useRef(false);
   const zoom = zoomLevels[zoomIndex];
   const dirty = boxes !== saved;
   const query = new URLSearchParams({ series, chapter });
@@ -98,11 +100,23 @@ export function Panels({ active }) {
 
   useEffect(() => {
     function refresh(event) {
-      if (event.detail === "panels" && !dirty) setReload(value => value + 1);
+      if (event.detail !== "panels") return;
+      if (drag.current || localEdits.current) {
+        refreshPending.current = true;
+        return;
+      }
+      setReload(value => value + 1);
     }
     window.addEventListener("bliss-batch-complete", refresh);
     return () => window.removeEventListener("bliss-batch-complete", refresh);
-  }, [dirty]);
+  }, []);
+
+  useEffect(() => {
+    if (!hasEdits && !drag.current && refreshPending.current) {
+      refreshPending.current = false;
+      setReload(value => value + 1);
+    }
+  }, [hasEdits]);
 
   useEffect(() => {
     if (!chapter) return;
@@ -153,8 +167,8 @@ export function Panels({ active }) {
     const strip = canvas.current.getBoundingClientRect();
     const offsetY = scroller.scrollTop === 0 ? 0 : scroller.clientHeight / 2;
     zoomAnchor.current = {
-      x: clamp((view.left + scroller.clientWidth / 2 - strip.left) / strip.width, 0, 1),
-      y: clamp((view.top + offsetY - strip.top) / strip.height, 0, 1),
+      x: strip.width ? clamp((view.left + scroller.clientWidth / 2 - strip.left) / strip.width, 0, 1) : 0.5,
+      y: strip.height ? clamp((view.top + offsetY - strip.top) / strip.height, 0, 1) : 0,
       offsetY,
     };
     setZoomIndex(next);
@@ -178,6 +192,7 @@ export function Panels({ active }) {
       const drafts = new Map(current);
       if (dirty) drafts.set(chapterKey, { document, boxes, saved, undo, nextId });
       else drafts.delete(chapterKey);
+      localEdits.current = drafts.size > 0;
       return drafts;
     });
     openReview(null);
@@ -244,21 +259,32 @@ export function Panels({ active }) {
       }
       if (count) toast.success(all ? `Saved panel edits for ${count} chapter${count === 1 ? "" : "s"}` : "Panel edits saved");
       if (failures.length) toast.error("Some panel edits could not be saved", { description: failures.join(" · ") });
+      if (!failures.length) localEdits.current = !all && chapterDrafts.size > 0;
     } finally {
       setPending("");
     }
   }
 
   function apply(next) {
+    localEdits.current = true;
     setUndo(history => [...history.slice(-49), boxes]);
     setBoxes(next.sort(readingOrder));
   }
 
+  function flushPanelRefresh() {
+    if (!refreshPending.current || drag.current || localEdits.current) return;
+    refreshPending.current = false;
+    setReload(value => value + 1);
+  }
+
   function undoEdit() {
     if (!undo.length) return;
-    setBoxes(undo.at(-1));
+    const previous = undo.at(-1);
+    localEdits.current = previous !== saved || chapterDrafts.size > 0;
+    setBoxes(previous);
     setUndo(undo.slice(0, -1));
     setSelected(null);
+    flushPanelRefresh();
   }
 
   function remove() {
@@ -282,7 +308,9 @@ export function Panels({ active }) {
       pointerId: event.pointerId,
       x: event.clientX - rect.left, y: event.clientY - rect.top, moved: false, frame: 0,
     };
-    event.currentTarget.setPointerCapture(event.pointerId);
+    // Capture on the stable canvas. Resize handles move with the preview box;
+    // capturing on a moving handle can lose the pointer before pointerup.
+    canvas.current.setPointerCapture(event.pointerId);
   }
 
   function beginDrawing(event) {
@@ -353,16 +381,23 @@ export function Panels({ active }) {
     if (!cancelled) updateDrag(edit, event.clientX, event.clientY);
     drag.current = null;
     setDraft(null);
-    if (cancelled || !edit.moved) return;
+    if (cancelled || !edit.moved) {
+      flushPanelRefresh();
+      return;
+    }
     if (edit.edge === "draw") {
       const [left, top, right, bottom] = edit.box;
-      if (left === right || top === bottom) return;
+      if (left === right || top === bottom) {
+        flushPanelRefresh();
+        return;
+      }
       const id = nextBoxId.current++;
       apply([...boxes, { id, box: edit.box }]);
       setSelected(id);
     } else if (edit.box.some((value, i) => value !== edit.original[i])) {
       replaceBox(edit.id, edit.box);
     }
+    flushPanelRefresh();
   }
 
   function keyboard(event) {
@@ -448,7 +483,7 @@ export function Panels({ active }) {
             style={{ width: document.width * zoom / 100 }}
             onPointerDownCapture={beginDrawing} onPointerMove={move}
             onPointerUp={event => end(event)} onPointerCancel={event => end(event, true)}
-            onLostPointerCapture={event => end(event, true)}>
+            onLostPointerCapture={event => end(event)}>
             {Array.from({ length: Math.ceil(document.height / document.tile_height) }, (_, index) => (
               <img key={`${document.source}-${index}`}
                 src={`/api/panels/tile/${index}?${query}&source=${document.source}`}

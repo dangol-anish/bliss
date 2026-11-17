@@ -27,24 +27,23 @@ if [[ ! -s frontend/dist/downloader.js || ! -s frontend/dist/app.css ]]; then
   npm run build
 fi
 
-.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000 &
-server=$!
-trap 'kill "$server" 2>/dev/null || true' EXIT
-trap 'exit 0' INT TERM HUP
+log_dir="$HOME/Library/Logs/Bliss"
+mkdir -p "$log_dir"
+log_file="$log_dir/server.log"
+label=local.bliss.server
+launchctl remove "$label" 2>/dev/null || true
+launchctl submit -l "$label" -o "$log_file" -e "$log_file" -- \
+  /bin/bash -c 'cd -- "$1" && export PATH="$2" && exec /usr/bin/caffeinate -dis .venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000' \
+  bliss "$PWD" "$PATH"
 
 for ((attempt = 0; attempt < 120; attempt++)); do
-  if ! kill -0 "$server" 2>/dev/null; then
-    wait "$server"
-    exit 1
-  fi
   if bliss_ready; then
     open "$url"
-    echo "Bliss is running. Keep this Terminal window open while using it."
-    wait "$server"
     exit
   fi
   sleep 0.5
 done
 
-echo "Bliss did not start. Check the server output above." >&2
+launchctl remove "$label" 2>/dev/null || true
+printf 'Bliss did not start. See %s for details.\n' "$log_file" >&2
 exit 1

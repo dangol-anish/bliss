@@ -148,7 +148,12 @@ export function Narration() {
       {error && <p role="alert" className="text-sm text-yellow-300">{error}</p>}
       <div className="flex flex-wrap items-center gap-2 border-t border-white/10 pt-3">
         <span className="mr-1 text-sm text-muted-foreground">{connected ? "AI Studio connected" : "Connect AI Studio"}</span>
-        {!connected && <>
+        {connected ? <Button variant="outline" size="sm" disabled={busy || running}
+          onClick={() => action("/api/bliss-studio/disconnect", {}, () => {
+            setConnected(false);
+            setCode("");
+            toast.success("Disconnected. Pair the extension on the AI Studio tab using the account you want to use.");
+          })}>Disconnect extension</Button> : <>
           <Button variant="outline" size="sm" disabled={busy}
             onClick={() => action("/api/bliss-studio/open-folder", {})}>Open Extension Folder</Button>
           <Button variant="outline" size="sm" disabled={busy}

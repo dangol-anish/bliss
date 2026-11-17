@@ -1,8 +1,11 @@
 'use strict';
 const BASE='http://127.0.0.1:8000/api/bliss-studio';
 let looping=false;
+let loopAgain=false;
 let lastRenderWake=0;
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const accountPathFor=url=>new URL(url).pathname.match(/^\/u\/\d+(?=\/|$)/)?.[0]||'/u/0';
+const accountScopedUrl=(accountPath,pathname='/prompts/new_chat')=>`https://aistudio.google.com${accountPath}${pathname}`;
 async function api(path,body,token){
   const response=await fetch(BASE+path,{method:'POST',headers:{'Content-Type':'application/json','X-Narration-Extension':chrome.runtime.id,...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(body||{}),signal:AbortSignal.timeout(12000)});
   const value=await response.json();
@@ -10,22 +13,19 @@ async function api(path,body,token){
   return value;
 }
 async function chosenTab(action){
-  const {tabId}=await chrome.storage.local.get('tabId');
+  const {tabId,accountPath}=await chrome.storage.local.get(['tabId','accountPath']);
   if(!Number.isInteger(tabId))throw Error('Open AI Studio in your normal browser, then connect that tab from the extension popup.');
   let tab;
   try{
     tab=await chrome.tabs.get(tabId);
   }catch(error){
     if(!/No tab with id/i.test(error.message))throw error;
-    tab=await chrome.tabs.create({url:'https://aistudio.google.com/prompts/new_chat',active:true});
-    await chrome.storage.local.set({tabId:tab.id,narrationWindowId:null});
-    await ready(tab.id,undefined);
-    tab=await chrome.tabs.get(tab.id);
-    if(!['hello','prepare'].includes(action)){
-      throw Object.assign(Error('The AI Studio tab closed. Reopening the batch.'),{code:'tab_lost'});
-    }
+    // Never silently create a replacement tab: it may be signed into a different
+    // Google account from the one the user explicitly paired.
+    throw Object.assign(Error('The paired AI Studio tab was closed. Open AI Studio on the Google account you want, pair that tab again, then Resume. No batch was sent.'),{code:'tab_lost'});
   }
   if(!tab.url?.startsWith('https://aistudio.google.com/'))throw Error('The selected tab is not ready in AI Studio. Finish signing in yourself, then Resume in the app.');
+  if(accountPath&&accountPathFor(tab.url)!==accountPath)throw Object.assign(Error(`The paired AI Studio tab changed Google accounts (expected account slot ${accountPath}). Open AI Studio on the intended account, pair that tab again, then Resume.`),{code:'tab_lost'});
   return tab;
 }
 async function renderingWindow(tab){
@@ -52,7 +52,7 @@ async function ready(tabId,previousDocument,expiresAt=Date.now()+25000){
 async function execute(command){
   if(!['hello','prepare','snapshot','send','recover'].includes(command.action))throw Error('Unknown narration action.');
   let tab=await chosenTab(command.action);
-  const token=(await chrome.storage.local.get('token')).token;
+  const {token,accountPath='/u/0'}=await chrome.storage.local.get(['token','accountPath']);
   const progress=step=>api('/progress',{id:command.id,step},token);
   if(Date.now()>command.expiresAt)throw Error('This browser action expired. Inspect the tab before resuming.');
   if(command.action==='hello'){const value=await ready(tab.id,undefined,command.expiresAt);return {url:tab.url,protocol:value.protocol,window_visibility:true};}
@@ -65,9 +65,13 @@ async function execute(command){
     await ready(tab.id,previousDocument,Math.min(command.expiresAt,Date.now()+30000));
   }
   if(command.action==='recover'||(command.action==='prepare'&&command.payload.fresh)){
-    const url=command.action==='recover'?command.payload.url:'https://aistudio.google.com/prompts/new_chat';
+    let url=command.action==='recover'?command.payload.url:accountScopedUrl(accountPath);
     const parsed=new URL(url);
-    if(parsed.origin!=='https://aistudio.google.com'||!parsed.pathname.startsWith('/prompts/')||parsed.search||parsed.hash)throw Error('Invalid AI Studio conversation address.');
+    if(parsed.origin!=='https://aistudio.google.com'||!/^\/(?:u\/\d+\/)?prompts\//.test(parsed.pathname)||parsed.search||parsed.hash)throw Error('Invalid AI Studio conversation address.');
+    // Google AI Studio uses /u/N to select a signed-in account. Preserve the
+    // account explicitly paired by the user even when restoring an old chat URL.
+    const conversationPath=parsed.pathname.replace(/^\/u\/\d+(?=\/)/,'');
+    url=accountScopedUrl(accountPath,conversationPath);
     let previousDocument;
     await progress('opening_tab');
     try{previousDocument=(await chrome.tabs.sendMessage(tab.id,{type:'narration-command',action:'ping'}))?.documentId;}catch(_){}
@@ -97,7 +101,7 @@ async function execute(command){
   return value;
 }
 async function loop(){
-  if(looping)return;looping=true;
+  if(looping){loopAgain=true;return;}looping=true;
   try{
     while(true){
       const {token}=await chrome.storage.local.get('token');if(!token)break;
@@ -116,7 +120,7 @@ async function loop(){
       }catch(error){await chrome.storage.local.set({connectionNote:error.message});break;}
       await delay(2000);
     }
-  }finally{looping=false;}
+  }finally{looping=false;if(loopAgain){loopAgain=false;queueMicrotask(()=>loop());}}
 }
 chrome.runtime.onMessage.addListener((message,sender,reply)=>{
   if(sender.id!==chrome.runtime.id)return;
@@ -129,11 +133,17 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
   if(!sender.url?.startsWith(chrome.runtime.getURL('')))return;
   if(message.type==='pair'){
     (async()=>{
-      const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
-      if(!tab?.url?.startsWith('https://aistudio.google.com/'))throw Error('Open AI Studio and finish signing in first. Then reopen this popup on that tab.');
+      const [activeTab]=await chrome.tabs.query({active:true,currentWindow:true});
+      let tab=activeTab;
+      if(!tab?.url?.startsWith('https://aistudio.google.com/')){
+        const {tabId}=await chrome.storage.local.get('tabId');
+        if(Number.isInteger(tabId))try{tab=await chrome.tabs.get(tabId);}catch(_){}
+      }
+      if(!tab?.url?.startsWith('https://aistudio.google.com/'))throw Error('Open AI Studio on the account you want, then connect from that tab.');
       const value=await api('/pair',{code:message.code});
-      await chrome.storage.local.set({token:value.token,tabId:tab.id,narrationWindowId:null,connectionNote:'Connected to this AI Studio tab.'});
-      loop();return {ok:true};
+      const accountPath=accountPathFor(tab.url);
+      await chrome.storage.local.set({token:value.token,tabId:tab.id,accountPath,pairedTabTitle:tab.title||tab.url,narrationWindowId:null,connectionNote:`Paired to AI Studio ${accountPath} tab ${tab.id}: ${tab.title||tab.url}`});
+      loop();return {ok:true,tabId:tab.id,tabTitle:tab.title||tab.url,accountPath};
     })().then(reply,error=>reply({error:error.message}));return true;
   }
   if(message.type==='wake'){loop();reply({ok:true});}

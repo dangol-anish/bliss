@@ -12,6 +12,7 @@ import { Panels } from "./panels.jsx";
 import { SplitStrip } from "./split-strip.jsx";
 import { Shorts } from "./shorts.jsx";
 import { Stitch } from "./stitch.jsx";
+import { WorkflowActivity } from "./workflow-activity.jsx";
 
 const workspaceClass = "min-w-0 flex-1 px-1 py-4 sm:px-5 sm:py-6";
 
@@ -105,6 +106,7 @@ function DownloaderLayout() {
             <a href="#backup" aria-current={backupSelected ? "page" : undefined}>Backup</a>
           </Button>
         </nav>
+        <WorkflowActivity />
       </aside>
       <main hidden={step !== "#downloader"} aria-label="Downloader" className={workspaceClass}>
         <form id="download-form" className="grid max-w-lg gap-4">

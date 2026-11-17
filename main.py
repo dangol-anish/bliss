@@ -1,16 +1,17 @@
 import logging
 import subprocess
 from pathlib import Path
-from threading import Lock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from chapter_backup import move_backup
+from chapter_operations import ChapterOperations
 from desktop import choose_backup_folder, open_folder
 import narration
+import workflow_activity
 from studio_bridge import local_request
 
 from downloader import DownloadCancellation, DownloadCancelled, DownloadError, download_batch, download_series
@@ -29,8 +30,9 @@ from strip_split import OUTPUT_DIR, save_split, split_plan
 ROOT = Path(__file__).resolve().parent
 DOWNLOADS = ROOT / "data" / "downloads"
 app = FastAPI()
-download_lock = Lock()
+chapter_operations = ChapterOperations()
 active_progress: tuple[UUID | None, int] = (None, 0)
+download_progress_state: tuple[UUID | None, int] = (None, 0)
 active_download: tuple[UUID | None, DownloadCancellation] | None = None
 
 
@@ -52,11 +54,51 @@ class BatchDownloadRequest(BaseModel):
 
 @app.get("/api/panels/progress/{progress_id}")
 @app.get("/api/stitch/progress/{progress_id}")
-@app.get("/api/download/progress/{progress_id}")
 def download_progress(progress_id: UUID, response: Response):
     active_id, percent = active_progress
     response.headers["Cache-Control"] = "no-store"
     return {"percent": percent if active_id == progress_id else None}
+
+
+@app.get("/api/download/progress/{progress_id}")
+def download_status(progress_id: UUID, response: Response):
+    active_id, percent = download_progress_state
+    response.headers["Cache-Control"] = "no-store"
+    return {"percent": percent if active_id == progress_id else None}
+
+
+@app.get("/api/download/active")
+def get_active_download(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    download = active_download
+    if download is None:
+        return None
+    progress_id, cancellation = download
+    active_id, percent = download_progress_state
+    return {"id": progress_id, "percent": percent if active_id == progress_id else 0,
+            "cancelling": cancellation.cancelled}
+
+
+@app.get("/api/workflow/active")
+def workflow_status(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    operations = workflow_activity.active_operations()
+    download = get_active_download(response)
+    if download:
+        operations.append({**download, "stage": "downloader",
+                           "label": "Cancelling download" if download["cancelling"] else "Downloading"})
+    job = dict(narration.active or {})
+    if job.get("running") or job.get("status") == "review":
+        total = job.get("total", 0)
+        operations.append({"id": job["key"], "stage": "narration",
+                           "label": job.get("message") or "Narrating",
+                           "series": job.get("series"), "chapter": job.get("chapter"),
+                           "percent": 100 * job.get("completed", 0) // total if total else None})
+    short = app.state.shorts_activity()
+    if short.get("running"):
+        operations.append({**short.get("selection", {}), "id": "shorts", "stage": "shorts",
+                           "label": short.get("message") or "Creating Short", "percent": short.get("percent")})
+    return operations
 
 
 @app.post("/api/download/cancel/{progress_id}", status_code=204)
@@ -87,17 +129,17 @@ def batch_download(request: BatchDownloadRequest):
 
 def run_download(progress_id, operation):
     global active_download
-    if not download_lock.acquire(blocking=False):
-        raise HTTPException(409, "A download is already running.")
-    cancellation = DownloadCancellation()
-    active_download = (progress_id, cancellation)
+    chapter_operations.acquire_download()
+    cancellation = DownloadCancellation(chapter_operations.reserve_download_series)
+    progress_id = progress_id or uuid4()
 
     def report_progress(percent):
-        global active_progress
-        active_progress = (progress_id, percent)
+        global download_progress_state
+        download_progress_state = (progress_id, percent)
 
     try:
         report_progress(0)
+        active_download = (progress_id, cancellation)
         return operation(report_progress, cancellation)
     except DownloadCancelled:
         return {"cancelled": True}
@@ -109,7 +151,7 @@ def run_download(progress_id, operation):
         raise HTTPException(500, "Could not save the downloaded chapters.") from exc
     finally:
         active_download = None
-        download_lock.release()
+        chapter_operations.release_download()
 
 
 class OpenFolderRequest(BaseModel):
@@ -151,8 +193,7 @@ def selected_chapters(request):
 
 def process_chapters(request, action, operation, *, progress_id=None):
     global active_progress
-    if not download_lock.acquire(blocking=False):
-        raise HTTPException(409, "Wait for the current download or chapter operation to finish.")
+    chapter_operations.acquire("stitching chapters" if operation == "stitch" else "renumbering pages")
     try:
         if progress_id is not None:
             active_progress = (progress_id, 0)
@@ -168,6 +209,7 @@ def process_chapters(request, action, operation, *, progress_id=None):
                         # Reserve the last part of each chapter for writing its PDF.
                         percent = int(100 * (len(results) + 0.99 * fraction) / len(chapters))
                         active_progress = (progress_id, percent)
+                        workflow_activity.report(progress_id, percent)
 
                     result = action(folder, report_progress=report_progress)
                 results.append(result)
@@ -181,7 +223,7 @@ def process_chapters(request, action, operation, *, progress_id=None):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     finally:
-        download_lock.release()
+        chapter_operations.release()
 
 
 @app.get("/api/stitch/series")
@@ -202,6 +244,7 @@ def open_stitch_folder(request: ChapterSelection):
 
 
 @app.post("/api/stitch/renumber")
+@workflow_activity.track("stitch", "Renumbering pages")
 def stitch_renumber(request: ChapterRange):
     results = process_chapters(request, renumber_chapter, "renumber")
     response = {key: sum(result[key] for result in results) for key in ("images", "renamed")}
@@ -211,6 +254,7 @@ def stitch_renumber(request: ChapterRange):
 
 
 @app.post("/api/stitch/create")
+@workflow_activity.track("stitch", "Stitching chapters")
 def create_stitch(request: ChapterRange):
     files = process_chapters(request, stitch_chapter, "stitch", progress_id=request.progress_id)
     return {"chapters": len(files), "files": files}
@@ -315,18 +359,22 @@ def panel_tile(index: int, series: str, chapter: str, source: str):
 
 
 @app.post("/api/panels/detect")
+@workflow_activity.track("panels", "Detecting panels")
 def panel_detect(request: PanelDetection):
     global active_progress
-    if not download_lock.acquire(blocking=False):
-        raise HTTPException(409, "Wait for the current chapter operation to finish.")
+    try:
+        folder = chapter_folder(DOWNLOADS, request.series, request.chapter)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    chapter_operations.acquire_detection(folder.parent, request.chapter)
 
     def report(percent):
         global active_progress
         active_progress = (request.progress_id, percent)
+        workflow_activity.report(request.progress_id, percent)
 
     try:
         report(0)
-        folder = chapter_folder(DOWNLOADS, request.series, request.chapter)
         with open_strip(folder, request.source, exact=True) as (strip, source):
             prior = read_review(folder, source)
             if prior is not None:
@@ -341,13 +389,13 @@ def panel_detect(request: PanelDetection):
         logging.getLogger(__name__).exception("Panel detection failed")
         raise HTTPException(500, "Could not detect panels in this chapter.") from exc
     finally:
-        download_lock.release()
+        chapter_operations.release_detection()
 
 
 @app.put("/api/panels/chapter", status_code=204)
+@workflow_activity.track("panels", "Saving panel review")
 def panel_save(request: PanelEdit):
-    if not download_lock.acquire(blocking=False):
-        raise HTTPException(409, "Wait for the current chapter operation to finish.")
+    chapter_operations.acquire("saving panel edits")
     try:
         folder = chapter_folder(DOWNLOADS, request.series, request.chapter)
         with open_strip(folder, request.source) as (strip, source):
@@ -363,7 +411,7 @@ def panel_save(request: PanelEdit):
         logging.getLogger(__name__).exception("Could not write panel review")
         raise HTTPException(500, "Could not save the panel review.") from exc
     finally:
-        download_lock.release()
+        chapter_operations.release()
 
 
 class StripSplit(ChapterSelection):
@@ -373,8 +421,7 @@ class StripSplit(ChapterSelection):
 
 
 def process_split(request: StripSplit, *, save=False):
-    if not download_lock.acquire(blocking=False):
-        raise HTTPException(409, "Wait for the current chapter operation to finish.")
+    chapter_operations.acquire("saving split images" if save else "finding split points")
     try:
         folder = chapter_folder(DOWNLOADS, request.series, request.chapter)
         with open_strip(folder, exact=True) as (strip, source):
@@ -393,15 +440,17 @@ def process_split(request: StripSplit, *, save=False):
         logging.getLogger(__name__).exception("Could not split the chapter strip")
         raise HTTPException(500, "Could not split the chapter strip.") from exc
     finally:
-        download_lock.release()
+        chapter_operations.release()
 
 
 @app.post("/api/split/preview")
+@workflow_activity.track("split-strip", "Finding cuts")
 def preview_split(request: StripSplit):
     return process_split(request)
 
 
 @app.post("/api/split/save")
+@workflow_activity.track("split-strip", "Saving split images")
 def commit_split(request: StripSplit):
     return process_split(request, save=True)
 
@@ -431,12 +480,14 @@ class BackupBatch(BaseModel):
 
 
 @app.post("/api/backup/create")
+@workflow_activity.track("backup", "Backing up chapters")
 def backup_chapters(body: ChapterRange, request: Request):
     result = run_backup([body], request)
     return result[0] if isinstance(result, list) else result
 
 
 @app.post("/api/backup/batch")
+@workflow_activity.track("backup", "Backing up chapters")
 def backup_batch(body: BackupBatch, request: Request):
     return run_backup(body.entries, request)
 
@@ -452,8 +503,7 @@ def run_backup(entries, request):
     destination = Path(choice).resolve()
     if destination.is_relative_to(DOWNLOADS.resolve()):
         raise HTTPException(400, "Choose a folder outside Bliss downloads.")
-    if not download_lock.acquire(blocking=False):
-        raise HTTPException(409, "Wait for the current chapter operation to finish.")
+    chapter_operations.acquire("backing up chapters")
     try:
         with narration.state_lock:
             if narration.active and narration.active["running"]:
@@ -478,10 +528,10 @@ def run_backup(entries, request):
         logging.exception("Could not archive the selected chapters")
         raise HTTPException(500, "Could not finish moving the chapters. Check the destination and available space.") from exc
     finally:
-        download_lock.release()
+        chapter_operations.release()
 
 
 install_narration(app, DOWNLOADS)
-install_preview(app, DOWNLOADS, lock=download_lock)
-install_shorts(app, DOWNLOADS, lock=download_lock)
+install_preview(app, DOWNLOADS, lock=chapter_operations)
+install_shorts(app, DOWNLOADS, lock=chapter_operations)
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True))

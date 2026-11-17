@@ -1,8 +1,10 @@
 """Prepare saved split images, validate replies, and retain accepted story revisions."""
 import base64
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from decimal import Decimal
 from hashlib import sha256
+from io import BytesIO
+from itertools import count
 import json
 import logging
 import os
@@ -16,6 +18,7 @@ from time import monotonic
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
+from PIL import Image
 
 from desktop import play_alert
 from panel_review import open_strip, read_review
@@ -140,6 +143,56 @@ def accepted_selection(downloads, series, chapter):
     raise ValueError("Finish the chapter in Narration first.")
 
 
+def upload_sections(manifest, file_state, boxes):
+    for section, (_, length, _) in zip(manifest["sections"], file_state):
+        if length <= MAX_BATCH_BYTES:
+            yield section, length
+            continue
+
+        start, stop = section["top"], section["bottom"]
+        spans = [(boxes[int(panel[1:]) - 1][1], boxes[int(panel[1:]) - 1][3], panel)
+                 for panel in section["panels"]]
+        boundaries = sorted({row for first, last, _ in spans for row in (first, last)
+                             if not any(a < row < b for a, b, _ in spans)})
+        # Bound each upload using its uncompressed RGB size plus encoding overhead.
+        width = manifest["width"]
+        tile_height = min(4096, (MAX_BATCH_BYTES - 65_536) // (3 * width))
+        top = start
+        stem = Path(section["file"]).stem
+        for index in count(1):
+            bottom = min(stop, top + tile_height)
+            if bottom < stop:
+                bottom = max((row for row in boundaries if top + tile_height // 2 <= row <= bottom),
+                             default=bottom)
+            yield {
+                "file": f"{stem}-part-{index:03}.jpg",
+                "original": section["file"],
+                "crop": (0, top - start, width, bottom - start),
+                "panels": [panel for first, _, panel in spans if top <= first < bottom],
+            }, 3 * width * (bottom - top) + 65_536
+            if bottom == stop:
+                break
+            top = bottom
+
+
+def upload_photos(directory, sections):
+    photos = []
+    with ExitStack() as images:
+        originals = {}
+        for section in sections:
+            original = section.get("original")
+            if original is None:
+                data = (directory / section["file"]).read_bytes()
+            else:
+                if original not in originals:
+                    originals[original] = images.enter_context(Image.open(directory / original))
+                with originals[original].crop(section["crop"]) as tile, BytesIO() as buffer:
+                    tile.save(buffer, format="JPEG", quality=95, subsampling=0)
+                    data = buffer.getvalue()
+            photos.append({"name": section["file"], "data": base64.b64encode(data).decode("ascii")})
+    return photos
+
+
 def selection(downloads, series, chapter, revision=None):
     folder = chapter_folder(downloads, series, chapter)
     series_id, number = identify(folder)
@@ -167,9 +220,7 @@ def selection(downloads, series, chapter, revision=None):
     batches = []
     group = []
     size = 0
-    for section, (_, length, _) in zip(manifest["sections"], file_state):
-        if length > MAX_BATCH_BYTES:
-            raise ValueError(f"{section['file']} exceeds the upload limit. Save a smaller split in Split Strip.")
+    for section, length in upload_sections(manifest, file_state, boxes):
         if len(group) == 20 or size + length > MAX_BATCH_BYTES:
             batches.append(group)
             group, size = [], 0
@@ -235,7 +286,7 @@ class Fact(BaseModel):
 
 class Continuity(BaseModel):
     summary: str = Field(max_length=5000)
-    open_threads: list[str] = Field(max_length=50)
+    open_threads: list[str]
 
 
 class Reply(BaseModel):
@@ -322,6 +373,10 @@ def receipt_and_prompt(selected, index, replies):
     return receipt, prompt, panel_ids
 
 
+class InvalidNarrationReply(studio_bridge.RetryableStudioError):
+    pass
+
+
 def receive(before, receipt, panel_ids, command):
     deadline = monotonic() + 600
     previous = None
@@ -340,7 +395,7 @@ def receive(before, receipt, panel_ids, command):
                 try:
                     return validate_reply(token[1], receipt, panel_ids)
                 except ValueError as exc:
-                    raise studio_bridge.RetryableStudioError(str(exc)) from exc
+                    raise InvalidNarrationReply(str(exc)) from exc
         else:
             previous, stable = None, 0
         cancel.wait(1)
@@ -387,15 +442,15 @@ def run_queue(downloads, selected, review=False):
         for index in range(len(replies), len(selected["batches"])):
             current_selection()
             receipt, prompt, ids = receipt_and_prompt(selected, index, replies)
-            photos = [{"name": section["file"], "data": base64.b64encode(
-                (selected["directory"] / section["file"]).read_bytes()
-            ).decode("ascii")} for section in selected["batches"][index]]
+            update(message="Preparing narration images")
+            photos = upload_photos(selected["directory"], selected["batches"][index])
             attempt = 0
+            correction = ""
             refresh = selected["submitted"] and index == len(selected["replies"])
             while True:
                 try:
                     current_selection()
-                    command("prepare", {"prompt": prompt, "photos": photos, "fresh": True,
+                    command("prepare", {"prompt": prompt + correction, "photos": photos, "fresh": True,
                                         "refresh": refresh, "schema": selected["schema"]}, 600)
                     before = {(reply["id"], reply["text"]) for reply in command("snapshot").get("replies", [])}
                     current_selection()
@@ -409,6 +464,11 @@ def run_queue(downloads, selected, review=False):
                 except studio_bridge.RetryableStudioError as exc:
                     save_draft(key, replies, False)
                     attempt += 1
+                    if isinstance(exc, InvalidNarrationReply):
+                        correction = ("\n\nThe previous reply failed validation. Correct this issue in the next "
+                                      "complete JSON reply while following the same receipt and panel IDs: " + str(exc))
+                    if attempt >= 4:
+                        raise RuntimeError(f"Batch {index + 1} paused after {attempt} attempts: {exc}") from exc
                     refresh = True
                     delay = min(60, 2 ** min(attempt, 6))
                     update(message=f"{exc} Refreshing AI Studio in {delay}s (retry {attempt}).")
@@ -455,6 +515,7 @@ def start_queue(downloads, selected, retry, review=False):
             raise ValueError("Connect the Bliss extension to your AI Studio tab first.")
         cancel.clear()
         active = {"running": True, "status": "running", "message": "Connecting to AI Studio",
+                  "series": selected["series"], "chapter": selected["chapter"],
                   "key": selected["key"], "completed": len(selected["replies"]), "total": len(selected["batches"])}
         Thread(target=run_queue, args=(downloads, selected, review), daemon=True).start()
 

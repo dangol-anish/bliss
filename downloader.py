@@ -1,17 +1,20 @@
 """Download publicly available chapters from Webtoon and Weeb Central."""
 import json
+import logging
 import re
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from html.parser import HTMLParser
+from http.client import IncompleteRead
 from io import BytesIO
 from itertools import count
 from pathlib import Path
 from shutil import rmtree
 from tempfile import TemporaryDirectory
-from threading import Lock
+from time import sleep
+from threading import Event, Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -39,9 +42,11 @@ class DownloadCancelled(Exception):
 
 
 class DownloadCancellation:
-    def __init__(self):
+    def __init__(self, reserve_series=None):
+        self.reserve_series = reserve_series
         self.lock = Lock()
         self.cancelled = False
+        self.cancel_event = Event()
         self.finished = False
 
     def cancel(self):
@@ -49,12 +54,17 @@ class DownloadCancellation:
             if self.finished:
                 return False
             self.cancelled = True
+            self.cancel_event.set()
             return True
 
     def check(self):
         with self.lock:
             if self.cancelled:
                 raise DownloadCancelled
+
+    def wait_to_retry(self, seconds):
+        if self.cancel_event.wait(seconds):
+            raise DownloadCancelled
 
     def finish(self):
         with self.lock:
@@ -106,25 +116,43 @@ def fetch(url, hosts, referer, limit=12 * 1024 * 1024, *, cancellation=None):
     if cancellation is not None:
         cancellation.check()
     request = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": referer})
-    try:
-        with build_opener(SourceRedirects(hosts)).open(request, timeout=25) as response:
-            if cancellation is None:
-                data = response.read(limit + 1)
-            else:
-                data = bytearray()
-                while len(data) <= limit:
+    opener = build_opener(SourceRedirects(hosts))
+    for attempt in range(3):
+        try:
+            with opener.open(request, timeout=25) as response:
+                if cancellation is None:
+                    data = response.read(limit + 1)
+                else:
+                    data = bytearray()
+                    while len(data) <= limit:
+                        cancellation.check()
+                        chunk = response.read1(min(256 * 1024, limit + 1 - len(data)))
+                        if not chunk:
+                            break
+                        data.extend(chunk)
                     cancellation.check()
-                    chunk = response.read1(min(256 * 1024, limit + 1 - len(data)))
-                    if not chunk:
-                        break
-                    data.extend(chunk)
-                cancellation.check()
-    except HTTPError as exc:
-        if exc.code == 429:
-            raise DownloadError("The source is rate limiting downloads. Try again later.") from exc
-        raise DownloadError(f"The source returned HTTP {exc.code}.") from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise DownloadError("Could not reach the source. Try again.") from exc
+                if response.length and len(data) <= limit:
+                    raise IncompleteRead(b"", response.length)
+            break
+        except HTTPError as exc:
+            status = exc.code
+            exc.close()
+            if status == 429:
+                raise DownloadError("The source is rate limiting downloads. Try again later.") from exc
+            if status not in {408, 500, 502, 503, 504} or attempt == 2:
+                raise DownloadError(f"The source returned HTTP {status}.") from exc
+            reason = f"HTTP {status}"
+        except (URLError, TimeoutError, OSError, IncompleteRead) as exc:
+            if attempt == 2:
+                raise DownloadError("Could not reach the source after 3 attempts.") from exc
+            reason = type(getattr(exc, "reason", exc)).__name__
+        logging.getLogger(__name__).info("Retrying %s after %s (%s/2)",
+                                        urlsplit(url).hostname, reason, attempt + 1)
+        delay = 2 ** attempt
+        if cancellation is None:
+            sleep(delay)
+        else:
+            cancellation.wait_to_retry(delay)
     if len(data) > limit:
         raise DownloadError("The source response was too large.")
     return data
@@ -255,7 +283,7 @@ def save_image(data, stem, is_webtoon):
         raise DownloadError("Could not read or save a chapter image.") from exc
 
 
-def series_directory(root: Path, series: str, title: str, *, created=None) -> Path:
+def series_directory(root: Path, series: str, title: str, *, created=None, reserve_series=None) -> Path:
     title = re.sub(r'[/\\:\x00-\x1f\x7f]', " ", title)
     title = " ".join(title.split()).strip(". ")
     title = title.encode("utf-8")[:200].decode("utf-8", "ignore").rstrip(". ")
@@ -267,6 +295,8 @@ def series_directory(root: Path, series: str, title: str, *, created=None) -> Pa
         identity = folder / ".bliss-series"
         if folder.is_dir() and not folder.is_symlink() and identity.is_file():
             if identity.read_text() == series:
+                if reserve_series is not None:
+                    reserve_series(folder)
                 return folder
 
     for number in count(1):
@@ -275,6 +305,9 @@ def series_directory(root: Path, series: str, title: str, *, created=None) -> Pa
             break
 
     legacy = root / series
+    if reserve_series is not None:
+        reserve_series(folder)
+        reserve_series(legacy)
     if legacy.is_dir() and not legacy.is_symlink():
         (legacy / ".bliss-series").write_text(series)
         legacy.rename(folder)
@@ -386,7 +419,8 @@ def _download_series(url, start, end, root, report_progress, cancellation, creat
     first, last = start or 1, end or len(chapters)
     if not 1 <= first <= last <= len(chapters):
         raise ValueError(f"Enter a chapter position from 1 to {len(chapters)}.")
-    directory = series_directory(root, series, title, created=created)
+    directory = series_directory(root, series, title, created=created,
+                                 reserve_series=cancellation.reserve_series)
     hosts, referer = (WEBTOON_IMAGES, WEBTOON_ROOT) if is_webtoon else (WEEB_IMAGES, WEEB_ROOT)
     total = last - first + 1
     completed = 0
